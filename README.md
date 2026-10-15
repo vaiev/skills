@@ -36,8 +36,12 @@ description: >-
 
 Skills for a remote always-on host that bots use as a second computer. The kit they drive is at https://github.com/vaiev/mcp/tree/main/sidecomputer. Fetch it with `git clone https://github.com/vaiev/mcp`, then use the `sidecomputer/` directory.
 
-| Skill | File | Use when |
-| --- | --- | --- |
-| sidecomputer-getting-started | `sidecomputer/getting-started/SKILL.md` | A new owner sets up a SideComputer host for the first time |
-| sidecomputer-dispatch | `sidecomputer/dispatch/SKILL.md` | Another bot hands a task to the host: submit it, poll, and return status and summary |
-| sidecomputer-admin | `sidecomputer/admin/SKILL.md` | The host needs a new tool or MCP, a key rotation, or an unlock or relock |
+Use these paths when another repository links here. The same table is in `sidecomputer/README.md`.
+
+| Skill | File | Canonical path | Use when |
+| --- | --- | --- | --- |
+| sidecomputer-getting-started | `sidecomputer/getting-started/SKILL.md` | `vaiev/skills/sidecomputer/getting-started/SKILL.md` | A new owner sets up a SideComputer host for the first time |
+| sidecomputer-dispatch | `sidecomputer/dispatch/SKILL.md` | `vaiev/skills/sidecomputer/dispatch/SKILL.md` | Another bot hands a task to the host: submit it, poll, and return status and summary |
+| sidecomputer-admin | `sidecomputer/admin/SKILL.md` | `vaiev/skills/sidecomputer/admin/SKILL.md` | The host needs a new tool or MCP, a key rotation, or an unlock or relock |
+
+The dispatch playbook is `vaiev/skills/sidecomputer/dispatch/SKILL.md`.
