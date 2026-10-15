@@ -7,8 +7,8 @@ There is no gate tool and no keep-line list.
 
 The new line keeps the option prefix bootstrap writes:
 
-- strict: command="/usr/local/bin/sidecomputer-gate",restrict
-- open: restrict,pty
+- both modes: command="/usr/local/bin/sidecomputer-gate",restrict,environment="SC_KEY_ID=<id>"
+- the comment identifies strict or open mode; rotation preserves the key id
 
 The temp file is chowned to the sidecomputer user and mode 0600 before
 rename, so sshd StrictModes accepts it. A failure before rename leaves the
@@ -19,15 +19,17 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import os
 import pwd
+import re
 import sys
 import tempfile
 from pathlib import Path
 
 BOT_USER = "sidecomputer"
 STRICT_OPTIONS = 'command="/usr/local/bin/sidecomputer-gate",restrict'
-OPEN_OPTIONS = "restrict,pty"
+OPEN_OPTIONS = STRICT_OPTIONS
 STRICT_COMMENT = "sidecomputer-bot"
 OPEN_COMMENT = "sidecomputer-bot-open"
 _ED25519_TYPE = b"ssh-ed25519"
@@ -92,19 +94,44 @@ def key_material(line: str) -> str | None:
     return None
 
 
-def format_bot_line(mode: str, material: str) -> str:
+def format_bot_line(mode: str, material: str, key_id: str | None = None) -> str:
     """Return one authorized_keys line with the exact bootstrap prefix for ``mode``."""
     try:
         options, comment = _MODES[mode]
     except KeyError as exc:
         raise RotationError("unknown mode; pass strict or open") from exc
     _validate_ed25519_material(material)
-    return f"{options} ssh-ed25519 {material} {comment}"
+    identity = key_id if key_id is not None else _fingerprint(material)
+    if not re.fullmatch(r'[A-Za-z0-9_:+/=.@-]+', identity):
+        raise RotationError("invalid SC_KEY_ID")
+    return f'{options},environment="SC_KEY_ID={identity}" ssh-ed25519 {material} {comment}'
 
 
-def _mode_of_options(options: str) -> str | None:
-    for mode, (required, _comment) in _MODES.items():
-        if options == required or options.startswith(required + ","):
+def _fingerprint(material: str) -> str:
+    _validate_ed25519_material(material)
+    digest = hashlib.sha256(base64.b64decode(material)).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _key_id(options: str) -> str | None:
+    identities = re.findall(r'(?:^|,)environment="SC_KEY_ID=([^"\s,\\]+)"(?=,|$)', options)
+    if len(identities) > 1:
+        raise RotationError("existing key has multiple SC_KEY_ID options")
+    return identities[0] if identities else None
+
+
+def _mode_of_options(options: str, comment: str) -> str | None:
+    # Recognize the legacy open prefix so strict rotation still requires an override.
+    if options == "restrict,pty":
+        return "open"
+    identity = _key_id(options)
+    if identity is None:
+        return None
+    canonical = f'{STRICT_OPTIONS},environment="SC_KEY_ID={identity}"'
+    if options != canonical:
+        return None
+    for mode, (_options, required_comment) in _MODES.items():
+        if comment == required_comment:
             return mode
     return None
 
@@ -141,8 +168,10 @@ def build_authorized_keys(
     mode: str | None,
     bot_material: str | None,
     retire_materials: set[str],
+    allow_mode_change: bool = False,
 ) -> str:
     """Return the full file body: one exact bootstrap bot line, or empty."""
+    identities: set[str] = set()
     for raw in existing.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -159,8 +188,21 @@ def build_authorized_keys(
                 "admin keys belong in the admin user's authorized_keys"
             )
         options = _line_options(line)
-        if options and mode is not None and _mode_of_options(options) not in (None, mode):
-            raise RotationError("existing key prefix does not match the requested mode")
+        identity = _key_id(options)
+        identities.add(identity if identity is not None else _fingerprint(material))
+        comment = line.split("ssh-ed25519", 1)[1].split(maxsplit=1)
+        comment = comment[1] if len(comment) > 1 else ""
+        existing_mode = _mode_of_options(options, comment)
+        if mode == "open":
+            canonical = f'{OPEN_OPTIONS},environment="SC_KEY_ID={identity}"'
+            mismatch = existing_mode != mode or options != canonical
+        else:
+            mismatch = existing_mode not in (None, mode)
+        if mode is not None and mismatch and not allow_mode_change:
+            raise RotationError(
+                "existing key prefix does not match the requested mode; "
+                "pass --allow-mode-change to override"
+            )
 
     if bot_material is None:
         return ""
@@ -168,7 +210,9 @@ def build_authorized_keys(
         raise RotationError("pass --mode strict or --mode open")
     if bot_material in retire_materials:
         raise RotationError("new bot key is also listed for retirement")
-    return format_bot_line(mode, bot_material) + "\n"
+    if len(identities) > 1:
+        raise RotationError("retired keys have conflicting SC_KEY_ID identities")
+    return format_bot_line(mode, bot_material, next(iter(identities), None)) + "\n"
 
 
 def rotate_bot_key(
@@ -180,6 +224,7 @@ def rotate_bot_key(
     replace_all: bool,
     remove_bot: bool,
     abort_before_rename: bool = False,
+    allow_mode_change: bool = False,
 ) -> None:
     """Replace ``keys_file`` in one rename, or leave it untouched on failure."""
     _require_admin()
@@ -209,6 +254,7 @@ def rotate_bot_key(
         mode=mode,
         bot_material=bot_material,
         retire_materials=retire_materials,
+        allow_mode_change=allow_mode_change,
     )
     owner = _bot_user_ids()
     _commit(keys_path, content.encode("utf-8"), owner, abort_before_rename)
@@ -276,6 +322,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", choices=sorted(_MODES))
     parser.add_argument("--replace-all", action="store_true")
     parser.add_argument("--remove-bot", action="store_true")
+    parser.add_argument("--allow-mode-change", action="store_true",
+                        help="override an existing prefix/mode mismatch")
     args = parser.parse_args(argv)
     try:
         rotate_bot_key(
@@ -285,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             mode=args.mode,
             replace_all=args.replace_all,
             remove_bot=args.remove_bot,
+            allow_mode_change=args.allow_mode_change,
         )
     except RotationError as exc:
         print(f"rotate_bot_key: {exc}", file=sys.stderr)
