@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Atomically replace the SideComputer bot key in an authorized_keys file.
+"""Atomically replace the SideComputer bot key in authorized_keys.
 
-The new file is written in full, fsynced, and renamed over the destination.
-A failure before that rename leaves the original file in place, so the
-previous bot key stays the only bot key from that file. There is no step
-where the old key and the new key are both authorized.
+An admin runs this as root after the owner approves. It refuses to run as
+the sidecomputer user, so the bot key cannot rewrite its own credentials.
+There is no gate tool and no keep-line list.
 
-Use ``--replace-all`` for rotation and removal. That mode does not copy
-lines out of the old file, so an unmarked key left behind by bootstrap
-cannot remain valid.
+The new line keeps the option prefix bootstrap writes:
+
+- strict: command="/usr/local/bin/sidecomputer-gate",restrict
+- open: restrict,pty
+
+The temp file is chowned to the sidecomputer user and mode 0600 before
+rename, so sshd StrictModes accepts it. A failure before rename leaves the
+previous file in place.
 """
 
 from __future__ import annotations
@@ -16,23 +20,26 @@ from __future__ import annotations
 import argparse
 import base64
 import os
+import pwd
 import sys
 import tempfile
 from pathlib import Path
 
-BOT_MARKER = "sidecomputer-bot"
+BOT_USER = "sidecomputer"
+STRICT_OPTIONS = 'command="/usr/local/bin/sidecomputer-gate",restrict'
+OPEN_OPTIONS = "restrict,pty"
+STRICT_COMMENT = "sidecomputer-bot"
+OPEN_COMMENT = "sidecomputer-bot-open"
 _ED25519_TYPE = b"ssh-ed25519"
-_ED25519_PREFIX = "ssh-ed25519 "
+
+_MODES = {
+    "strict": (STRICT_OPTIONS, STRICT_COMMENT),
+    "open": (OPEN_OPTIONS, OPEN_COMMENT),
+}
 
 
 class RotationError(Exception):
     """The keys file was left unchanged."""
-
-
-def parse_bot_pubkey(text: str) -> str:
-    """Return one authorized_keys line for the new bot key."""
-    material = public_key_material(text)
-    return f"{_ED25519_PREFIX}{material} {BOT_MARKER}"
 
 
 def public_key_material(text: str) -> str:
@@ -77,7 +84,7 @@ def _validate_ed25519_material(material: str) -> None:
 
 
 def key_material(line: str) -> str | None:
-    """Return ssh-ed25519 material from a line, including option-prefixed lines."""
+    """Return ssh-ed25519 material from a line, including an option prefix."""
     parts = line.split()
     for index, part in enumerate(parts):
         if part == "ssh-ed25519" and index + 1 < len(parts):
@@ -85,68 +92,82 @@ def key_material(line: str) -> str | None:
     return None
 
 
+def format_bot_line(mode: str, material: str, existing_options: str | None = None) -> str:
+    """Return one authorized_keys line in the bootstrap format for ``mode``."""
+    try:
+        required, comment = _MODES[mode]
+    except KeyError as exc:
+        raise RotationError("unknown mode; pass strict or open") from exc
+    options = required
+    if existing_options:
+        if existing_options != required and not existing_options.startswith(required + ","):
+            raise RotationError("existing key prefix does not match the requested mode")
+        options = existing_options
+    _validate_ed25519_material(material)
+    return f"{options} ssh-ed25519 {material} {comment}"
+
+
+def _require_admin() -> None:
+    if os.geteuid() != 0:
+        raise RotationError(
+            "rotation runs only as root from an admin session; "
+            "the bot key cannot change its own credentials"
+        )
+    if os.environ.get("SUDO_USER") == BOT_USER:
+        raise RotationError("the sidecomputer user cannot rotate its own key")
+
+
+def _bot_user_ids() -> tuple[int, int]:
+    try:
+        user = pwd.getpwnam(BOT_USER)
+    except KeyError as exc:
+        raise RotationError(f"user {BOT_USER} does not exist") from exc
+    return user.pw_uid, user.pw_gid
+
+
+def _line_options(line: str) -> str:
+    parts = line.split()
+    for index, part in enumerate(parts):
+        if part == "ssh-ed25519":
+            return " ".join(parts[:index])
+    return ""
+
+
 def build_authorized_keys(
     existing: str,
     *,
-    bot_line: str | None,
+    mode: str | None,
+    bot_material: str | None,
     retire_materials: set[str],
-    keep_lines: list[str],
-    replace_all: bool,
 ) -> str:
-    """Return the full authorized_keys body that should replace the file."""
-    kept: list[str] = []
-    if not replace_all:
-        for raw in existing.splitlines():
-            line = raw.strip()
-            if not line:
-                continue
-            if BOT_MARKER in line:
-                continue
-            material = key_material(line)
-            if material is not None and material in retire_materials:
-                continue
-            kept.append(line)
-
-    new_material = key_material(bot_line) if bot_line is not None else None
-    for raw in keep_lines:
-        if "\n" in raw or "\r" in raw or "\x00" in raw:
-            raise RotationError("keep line must be a single line")
+    """Return the full file body: one bootstrap bot line, or empty."""
+    existing_options: str | None = None
+    for raw in existing.splitlines():
         line = raw.strip()
-        if not line:
-            raise RotationError("keep line is empty")
-        if BOT_MARKER in line:
-            raise RotationError("keep line cannot carry the bot marker")
+        if not line or line.startswith("#"):
+            continue
         material = key_material(line)
-        if material is not None and material in retire_materials:
-            raise RotationError("keep line contains a retired key")
-        if new_material is not None and material == new_material:
-            raise RotationError("keep line duplicates the new bot key")
-        if line not in kept:
-            kept.append(line)
+        if material is None:
+            raise RotationError(
+                "keys file contains a non-ed25519 line; admin keys belong in "
+                "the admin user's authorized_keys"
+            )
+        if material not in retire_materials:
+            raise RotationError(
+                "keys file contains a key that is not being retired; "
+                "admin keys belong in the admin user's authorized_keys"
+            )
+        options = _line_options(line)
+        if options:
+            existing_options = options
 
-    if bot_line is not None:
-        if new_material is None:
-            raise RotationError("bot line is not an ssh-ed25519 key")
-        if new_material in retire_materials:
-            raise RotationError("new bot key is also listed for retirement")
-        kept.append(bot_line)
-
-    for line in kept:
-        material = key_material(line)
-        if material is not None and material in retire_materials:
-            raise RotationError("retired key would remain authorized")
-        if BOT_MARKER in line and line != bot_line:
-            raise RotationError("an old bot key would remain authorized")
-
-    if bot_line is not None:
-        copies = [line for line in kept if key_material(line) == new_material]
-        if copies != [bot_line]:
-            raise RotationError("new bot key must appear exactly once")
-
-    body = "\n".join(kept)
-    if body:
-        body += "\n"
-    return body
+    if bot_material is None:
+        return ""
+    if mode is None:
+        raise RotationError("pass --mode strict or --mode open")
+    if bot_material in retire_materials:
+        raise RotationError("new bot key is also listed for retirement")
+    return format_bot_line(mode, bot_material, existing_options) + "\n"
 
 
 def rotate_bot_key(
@@ -154,20 +175,23 @@ def rotate_bot_key(
     *,
     bot_pubkey: str | None,
     retire_pubkeys: list[str],
-    keep_lines: list[str],
+    mode: str | None,
     replace_all: bool,
     remove_bot: bool,
     abort_before_rename: bool = False,
 ) -> None:
     """Replace ``keys_file`` in one rename, or leave it untouched on failure."""
+    _require_admin()
     if remove_bot and bot_pubkey:
         raise RotationError("pass either a new bot key or --remove-bot")
     if not remove_bot and not bot_pubkey:
         raise RotationError("pass a new bot key or --remove-bot")
-    if not replace_all and not retire_pubkeys:
-        raise RotationError("pass --replace-all or at least one --retire-pubkey")
+    if not replace_all:
+        raise RotationError("pass --replace-all; appending a key is not a rotation")
+    if not remove_bot and mode not in _MODES:
+        raise RotationError("unknown mode; pass strict or open")
 
-    bot_line = None if remove_bot else parse_bot_pubkey(bot_pubkey or "")
+    bot_material = None if remove_bot else public_key_material(bot_pubkey or "")
     retire_materials = {public_key_material(pubkey) for pubkey in retire_pubkeys}
     keys_path = Path(keys_file)
     if keys_path.is_symlink():
@@ -176,17 +200,17 @@ def rotate_bot_key(
     existing = ""
     if keys_path.exists():
         existing = keys_path.read_text(encoding="utf-8")
-    elif not replace_all:
-        raise RotationError("keys file does not exist; use --replace-all to create it")
+    elif retire_pubkeys:
+        raise RotationError("keys file does not exist")
 
     content = build_authorized_keys(
         existing,
-        bot_line=bot_line,
+        mode=mode,
+        bot_material=bot_material,
         retire_materials=retire_materials,
-        keep_lines=keep_lines,
-        replace_all=replace_all,
     )
-    _commit(keys_path, content.encode("utf-8"), abort_before_rename)
+    owner = _bot_user_ids()
+    _commit(keys_path, content.encode("utf-8"), owner, abort_before_rename)
 
 
 def _write_all(descriptor: int, content: bytes) -> None:
@@ -198,7 +222,12 @@ def _write_all(descriptor: int, content: bytes) -> None:
         view = view[written:]
 
 
-def _commit(path: Path, content: bytes, abort_before_rename: bool) -> None:
+def _commit(
+    path: Path,
+    content: bytes,
+    owner: tuple[int, int],
+    abort_before_rename: bool,
+) -> None:
     directory = path.parent
     if not directory.is_dir():
         raise RotationError("keys directory does not exist")
@@ -207,6 +236,7 @@ def _commit(path: Path, content: bytes, abort_before_rename: bool) -> None:
     closed = False
     try:
         os.fchmod(descriptor, 0o600)
+        os.fchown(descriptor, owner[0], owner[1])
         _write_all(descriptor, content)
         os.fsync(descriptor)
         os.close(descriptor)
@@ -215,9 +245,6 @@ def _commit(path: Path, content: bytes, abort_before_rename: bool) -> None:
             raise RotationError("aborted before rename")
         os.replace(tmp_path, path)
         tmp_path = None
-        # The rename has committed. A later directory fsync failure must not
-        # look like a failed rotation, or the caller would discard the new key
-        # while the host already trusts it.
         try:
             dir_fd = os.open(directory, os.O_RDONLY)
         except OSError:
@@ -237,12 +264,15 @@ def _commit(path: Path, content: bytes, abort_before_rename: bool) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Atomically replace the SideComputer bot key in authorized_keys."
+        description=(
+            "Atomically replace the SideComputer bot key. "
+            "Admin session only. There is no keep-line list."
+        )
     )
     parser.add_argument("--keys-file", required=True, type=Path)
     parser.add_argument("--bot-pubkey", default=None)
     parser.add_argument("--retire-pubkey", action="append", default=[])
-    parser.add_argument("--keep-line", action="append", default=[])
+    parser.add_argument("--mode", choices=sorted(_MODES))
     parser.add_argument("--replace-all", action="store_true")
     parser.add_argument("--remove-bot", action="store_true")
     args = parser.parse_args(argv)
@@ -251,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             args.keys_file,
             bot_pubkey=args.bot_pubkey,
             retire_pubkeys=args.retire_pubkey,
-            keep_lines=args.keep_line,
+            mode=args.mode,
             replace_all=args.replace_all,
             remove_bot=args.remove_bot,
         )

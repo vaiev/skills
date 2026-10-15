@@ -8,9 +8,9 @@ description: >-
 
 **Kit:** https://github.com/vaiev/mcp/tree/main/sidecomputer — fetch it with `git clone https://github.com/vaiev/mcp`, then use the `sidecomputer/` directory.
 
-These change the host and always need the owner's explicit approval. Profile installs and mode changes also need an admin session (temporary admin key, or open mode). The bot's strict key cannot install packages or change mode, by design.
+These change the host and always need the owner's explicit approval plus an admin session (temporary admin key, open mode, or console or provider access when locked). The bot's strict key cannot install packages, change mode, or rewrite its own credentials.
 
-Bot-key removal and rotation do not need provider console, rescue mode, or an SSH admin key. They use one atomic replace, including on a locked host.
+There is no gate rotate tool. Do not install `rotate_bot_key.py` on a path the sidecomputer user can execute, and do not add it to the gate.
 
 ## Add a tool or MCP (profile update)
 1. Never install ad hoc. Edit or add `profiles/<name>.json` in the kit: `packages` (apt), `mcps` (npm specs), `prompt_runner` (argv with `{prompt}`), limits (`max_timeout`, `memory_max`, `cpu_quota`, `artifact_max_bytes`), optional `env` without secrets.
@@ -20,38 +20,43 @@ Bot-key removal and rotation do not need provider console, rescue mode, or an SS
 5. Confirm with `list_profiles` and `health` over the gate.
 
 ## Rotate or remove the bot key
-Run `sidecomputer/admin/rotate_bot_key.py` (on the host: `/usr/local/lib/sidecomputer/rotate_bot_key.py`) through the gate tool `rotate_bot_key`. The script writes the whole `authorized_keys` file and renames it into place. A half-finished rotation leaves the previous file untouched, so only the previous bot key stays valid. Both keys are never valid together.
+Rotation is an admin-only step. The owner approves it in the admin session first. Then an admin runs `sidecomputer/admin/rotate_bot_key.py` as root. The script refuses to run as the sidecomputer user, including when `SUDO_USER` is `sidecomputer`, so the bot key cannot rotate itself.
 
-Do this with the current bot key, through the gate. Console access is not part of the procedure.
+On a locked host, no SSH admin key remains. Restore an admin session with the provider console, rescue mode, or cloud-init, get the owner's approval, and run the same command. The bot key still cannot do it.
+
+The script writes the sidecomputer user's `authorized_keys` (typically `/home/sidecomputer/.ssh/authorized_keys`) and renames it into place. Before the rename it chowns the file to `sidecomputer` and mode `0600`. A half-finished rotation leaves the previous file untouched, so only the previous bot key stays valid.
+
+The new line keeps the option prefix bootstrap writes:
+
+- strict: `command="/usr/local/bin/sidecomputer-gate",restrict ssh-ed25519 <key> sidecomputer-bot`
+- open: `restrict,pty ssh-ed25519 <key> sidecomputer-bot-open`
+
+Pass `--mode strict` or `--mode open`. An unknown mode is refused. There is no `--keep-line`. Admin keys live in the admin user's `authorized_keys`, not in the sidecomputer user's file. The script refuses a sidecomputer `authorized_keys` that contains any other key.
 
 Re-running bootstrap is not a rotation. Bootstrap keeps old keys, so a follow-up delete can fail and leave both keys valid. Do not append a key, and do not edit `authorized_keys` a line at a time.
 
-The keys file is the sidecomputer user's `authorized_keys`, typically `/home/sidecomputer/.ssh/authorized_keys`.
-
 ### Replace the key
 1. Generate a new ed25519 key pair. Store the private key in the secret store as pending. Keep the current key active.
-2. Ask the owner to approve the rotation.
-3. Call `rotate_bot_key` once. The gate runs:
-   `python3 /usr/local/lib/sidecomputer/rotate_bot_key.py --keys-file /home/sidecomputer/.ssh/authorized_keys --replace-all --retire-pubkey "<current pubkey>" --bot-pubkey "<new pubkey>"`
-   Add one `--keep-line` for each admin line that must remain in that file. On a locked host there is no admin line, so pass only the new bot key. Do not pass the current bot key as a keep line. `--replace-all` does not copy the old file, and `--retire-pubkey` makes the script refuse a result that still contains the current key.
-4. Continue only when the tool exits 0. Otherwise stop, delete the pending private key, and keep using the current key. The failed attempt has not authorized the new key.
-5. Verify `tools` with the new key, then confirm the old key is refused.
+2. Get the owner's approval in the admin session.
+3. As root, from that admin session:
+   `sudo python3 sidecomputer/admin/rotate_bot_key.py --keys-file /home/sidecomputer/.ssh/authorized_keys --mode <strict|open> --replace-all --retire-pubkey "<current pubkey>" --bot-pubkey "<new pubkey>"`
+4. Continue only when the command exits 0. Otherwise stop, delete the pending private key, and keep using the current key. The failed attempt has not authorized the new key.
+5. End sessions that are still open with the old key. Verify `tools` with the new key, then confirm the old key is refused.
 6. After that confirmation, delete the old private key everywhere it was stored and mark the new key active.
 
 ### Remove the key
-To decommission the bot key, get the owner's approval and call `rotate_bot_key` once:
-`python3 /usr/local/lib/sidecomputer/rotate_bot_key.py --keys-file /home/sidecomputer/.ssh/authorized_keys --replace-all --remove-bot --retire-pubkey "<current pubkey>"`
-Pass `--keep-line` for each admin line that must remain. With no keep line, the file has no keys. This is one replace, with no console step. Confirm the old key is refused before deleting its private key from the secret store.
+Get the owner's approval, then as root:
+`sudo python3 sidecomputer/admin/rotate_bot_key.py --keys-file /home/sidecomputer/.ssh/authorized_keys --replace-all --remove-bot --retire-pubkey "<current pubkey>"`
+This clears the sidecomputer user's bot key only. It does not edit the admin user's `authorized_keys`. Confirm the old key is refused, end sessions still using it, and then delete its private key from the secret store.
 
 ## Unlock (temporarily)
-- When locked, no SSH admin key remains. Profile and package changes need an admin session restored by provider console, rescue mode, or cloud-init. A backup of the admin authorized_keys is left on the host.
-- Bot-key rotation and removal stay on the atomic path above and do not use that console path.
+- When locked, no SSH admin key remains. Profile changes, package changes, and bot-key rotation need an admin session restored by provider console, rescue mode, or cloud-init. A backup of the admin authorized_keys is left on the host.
 - Or re-run bootstrap with `--mode open` for debugging. Tell the owner this is less safe and set a time limit.
 
 ## Relock
 1. Re-run bootstrap with `--mode strict --lock`.
 2. Check the JSON summary shows strict mode and locked.
-3. Verify the gate rejects other commands and that `health` is ok. Confirm `tools` still lists `rotate_bot_key`.
+3. Verify the gate rejects other commands and that `health` is ok.
 4. Update memory: mode and lock state only.
 
 ## Always
