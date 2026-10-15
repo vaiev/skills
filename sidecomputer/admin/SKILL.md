@@ -28,8 +28,12 @@ The script writes the sidecomputer user's `authorized_keys` (typically `/home/si
 
 The new line keeps the option prefix bootstrap writes:
 
-- strict: `command="/usr/local/bin/sidecomputer-gate",restrict ssh-ed25519 <key> sidecomputer-bot`
-- open: `restrict,pty ssh-ed25519 <key> sidecomputer-bot-open`
+- strict: `command="/usr/local/bin/sidecomputer-gate",restrict,environment="SC_KEY_ID=<id>" ssh-ed25519 <key> sidecomputer-bot`
+- open: `command="/usr/local/bin/sidecomputer-gate",restrict,environment="SC_KEY_ID=<id>" ssh-ed25519 <key> sidecomputer-bot-open`
+
+Rotation preserves the existing `SC_KEY_ID` so its grants continue to apply. For a legacy line without an ID, it uses the retired key’s SHA256 fingerprint; for an empty file, it uses the new key’s fingerprint. Conflicting identities are refused. Both modes retain the forced command, including when the file is empty.
+
+Open-mode rotation refuses every existing key line whose prefix is not exactly canonical, or whose mode comment differs. To intentionally migrate a legacy prefix or change modes, pass `--allow-mode-change` after owner approval; the output still uses the canonical restrictions.
 
 Pass `--mode strict` or `--mode open`. An unknown mode is refused. There is no `--keep-line`. Admin keys live in the admin user's `authorized_keys`, not in the sidecomputer user's file. The script refuses a sidecomputer `authorized_keys` that contains any other key.
 

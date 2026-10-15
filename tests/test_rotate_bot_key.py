@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import struct
 import subprocess
@@ -15,8 +16,10 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "sidecomputer" / "admin" / "rotate_bot_key.py"
 
-STRICT_OPTIONS = 'command="/usr/local/bin/sidecomputer-gate",restrict'
-OPEN_OPTIONS = "restrict,pty"
+KEY_ID = "SHA256:existing-grant-identity"
+STRICT_OPTIONS = ('command="/usr/local/bin/sidecomputer-gate",restrict,'
+                  f'environment="SC_KEY_ID={KEY_ID}"')
+OPEN_OPTIONS = STRICT_OPTIONS
 
 
 def _load():
@@ -101,12 +104,71 @@ class RotateBotKeyTest(unittest.TestCase):
         self.assertNotIn(OLD.split()[1], body)
         self.assertEqual(self.keys.stat().st_mode & 0o777, 0o600)
 
-    def test_open_bootstrap_line_keeps_restrict_pty(self) -> None:
+    def test_open_bootstrap_line_keeps_command_restrict_and_identity(self) -> None:
         self._write(_open(OLD) + "\n")
         self._rotate(mode="open")
         body = self.keys.read_text(encoding="utf-8")
         self.assertEqual(body, _open(NEW) + "\n")
         self.assertNotIn(OLD.split()[1], body)
+
+    def test_existing_identity_is_preserved_in_both_modes(self) -> None:
+        for mode, line in (("strict", _strict), ("open", _open)):
+            with self.subTest(mode=mode):
+                original = line(OLD).replace(KEY_ID, "SHA256:another-grant")
+                self._write(original + "\n")
+                self._rotate(mode=mode)
+                self.assertEqual(
+                    self.keys.read_text(),
+                    line(NEW).replace(KEY_ID, "SHA256:another-grant") + "\n",
+                )
+
+    def test_empty_file_open_rotation_has_all_bootstrap_options(self) -> None:
+        self._write("")
+        self._rotate(mode="open", retire_pubkeys=[])
+        digest = hashlib.sha256(base64.b64decode(NEW.split()[1])).digest()
+        identity = "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+        self.assertEqual(self.keys.read_text(), _open(NEW).replace(KEY_ID, identity) + "\n")
+
+    def test_open_refuses_every_noncanonical_prefix_without_override(self) -> None:
+        prefixes = [
+            "", "restrict,pty", "restrict", 'command="/other",restrict',
+            STRICT_OPTIONS + ",pty",
+            STRICT_OPTIONS.replace(",restrict,", ","),
+            f'environment="SC_KEY_ID={KEY_ID}",command="/usr/local/bin/sidecomputer-gate",restrict',
+        ]
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                original = f"{prefix} {OLD} sidecomputer-bot-open\n"
+                self._write(original)
+                with self.assertRaisesRegex(ROTATE.RotationError, "mode"):
+                    self._rotate(mode="open")
+                self.assertEqual(self.keys.read_text(), original)
+
+    def test_mode_change_override_canonicalizes_legacy_open_line(self) -> None:
+        self._write(f"restrict,pty {OLD} sidecomputer-bot-open\n")
+        self._rotate(mode="open", allow_mode_change=True)
+        body = self.keys.read_text()
+        self.assertIn('command="/usr/local/bin/sidecomputer-gate",restrict,environment="SC_KEY_ID=', body)
+        self.assertTrue(body.endswith(f"{NEW} sidecomputer-bot-open\n"))
+
+    def test_mode_change_override_preserves_identity(self) -> None:
+        self._write(_strict(OLD) + "\n")
+        self._rotate(mode="open", allow_mode_change=True)
+        self.assertEqual(self.keys.read_text(), _open(NEW) + "\n")
+
+    def test_legacy_open_to_strict_requires_override(self) -> None:
+        original = f"restrict,pty {OLD} sidecomputer-bot-open\n"
+        self._write(original)
+        with self.assertRaisesRegex(ROTATE.RotationError, "mode"):
+            self._rotate()
+        self.assertEqual(self.keys.read_text(), original)
+
+    def test_conflicting_identities_leave_file_unchanged(self) -> None:
+        original = _strict(OLD) + "\n" + _strict(ADMIN).replace(KEY_ID, "other-id") + "\n"
+        self._write(original)
+        with self.assertRaisesRegex(ROTATE.RotationError, "conflicting"):
+            self._rotate(retire_pubkeys=[OLD, ADMIN])
+        self.assertEqual(self.keys.read_text(), original)
 
     def test_unknown_mode_leaves_the_file_unchanged(self) -> None:
         original = _strict(OLD) + "\n"
@@ -117,14 +179,14 @@ class RotateBotKeyTest(unittest.TestCase):
 
     def test_extra_options_are_replaced_by_the_exact_prefix(self) -> None:
         extended = (
-            'command="/usr/local/bin/sidecomputer-gate",restrict,pty '
+            f'{STRICT_OPTIONS},pty '
             f"{OLD} sidecomputer-bot\n"
         )
         self._write(extended)
         self._rotate()
         body = self.keys.read_text(encoding="utf-8")
         self.assertEqual(body, _strict(NEW) + "\n")
-        self.assertNotIn(",restrict,pty", body)
+        self.assertNotIn(",pty", body)
 
     def test_mode_mismatch_leaves_the_file_unchanged(self) -> None:
         original = _strict(OLD) + "\n"
@@ -253,7 +315,8 @@ class SkillContractTest(unittest.TestCase):
         lowered = text.lower()
         self.assertIn("rotate_bot_key.py", text)
         self.assertIn('command="/usr/local/bin/sidecomputer-gate",restrict', text)
-        self.assertIn("restrict,pty", text)
+        self.assertIn('environment="SC_KEY_ID=<id>"', text)
+        self.assertIn("--allow-mode-change", text)
         self.assertIn("admin user's `authorized_keys`", text)
         self.assertIn("no `--keep-line`", lowered)
         self.assertIn("no gate rotate tool", lowered)
