@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# mock gh: serves $MOCK_DIR/<case files>
+[ "$1" = pr ] && { echo "MERGED $*" >> "$MOCK_DIR/merged"; exit 0; }
+p="${@: -1}"
+case "$p" in
+ */check-runs) [ -f "$MOCK_DIR/cr403" ] && { echo "gh: Resource not accessible (HTTP 403)" >&2; exit 1; }; cat "$MOCK_DIR/cr.json";;
+ */actions/runs*) cat "$MOCK_DIR/runs.json";;
+ */reviews) cat "$MOCK_DIR/reviews.json";;
+ */comments*) cat "$MOCK_DIR/comments.json";;
+ */pulls/*) echo '{"head":{"sha":"aaaaaaa1111111111111111111111111111111111"}}';;
+esac
