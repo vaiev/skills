@@ -18,7 +18,13 @@ SECRET_MARKERS = (
     "BEGIN " "OPENSSH PRIVATE KEY",
     "BEGIN " "RSA PRIVATE KEY",
     "BEGIN " "EC PRIVATE KEY",
+    "BEGIN " "DSA PRIVATE KEY",
+    "BEGIN " "PRIVATE KEY",
     "x-access-" "token:",
+    "gh" "p_",
+    "github_" "pat_",
+    "sk" "-",
+    "xo" "x",
 )
 
 
@@ -29,6 +35,14 @@ class ReleaseDocsTest(unittest.TestCase):
         self.assertIn("```mermaid", text)
         self.assertIn("vaiev/skills/sidecomputer/dispatch/SKILL.md", text)
         self.assertIn("Apache License, Version 2.0", text)
+        lowered = text.lower()
+        self.assertNotIn("authenticated", lowered)
+        self.assertIn("self-asserted", lowered)
+        self.assertIn("HUB_BOT", text)
+        self.assertIn("security decision", lowered)
+        self.assertIn("no rotate tool", lowered)
+        self.assertIn("redacts all artifacts", lowered)
+        self.assertNotIn("verified sender", lowered)
 
     def test_license_is_apache_2(self) -> None:
         text = (ROOT / "LICENSE").read_text(encoding="utf-8")
@@ -40,11 +54,20 @@ class ReleaseDocsTest(unittest.TestCase):
     def test_security_and_contributing_exist(self) -> None:
         security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
         contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-        self.assertIn("private vulnerability reporting", security.lower())
+        security_lower = security.lower()
+        self.assertIn("private vulnerability reporting", security_lower)
+        self.assertIn("https://github.com/vaiev", security)
+        self.assertIn("until then", security_lower)
+        self.assertNotIn("authenticated", security_lower)
+        self.assertIn("self-asserted", security_lower)
+        self.assertIn("redacts all artifacts", security_lower)
         self.assertIn("python3 -m unittest discover -s tests -v", contributing)
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("python3 -m unittest discover -s tests -v", workflow)
         self.assertIn("contents: read", workflow)
+        self.assertIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow)
+        self.assertIn("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", workflow)
+        self.assertNotIn("actions/checkout@v4", workflow)
 
     def test_skill_frontmatter(self) -> None:
         for name, path in SKILLS.items():

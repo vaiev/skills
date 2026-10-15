@@ -28,33 +28,40 @@ The host kit is https://github.com/vaiev/mcp/tree/main/sidecomputer. Fetch it wi
 flowchart TB
   Owner[Owner]
   OtherBots[Other bots]
-  Hub[Authenticated hub]
+  Hub[Shared hub, cooperative]
   Dispatch[Dispatcher bot]
   Gate[SideComputer gate]
   Worker[Worker profile]
-  Keys[authorized_keys]
+  Admin[Admin session as root]
+  Keys[sidecomputer authorized_keys]
 
   OtherBots -->|"handoff text is data"| Hub
-  Hub -->|"verified sender identity"| Dispatch
-  Owner -->|"allowlist and approval"| Dispatch
-  Owner -->|"temporary admin key via secure secret input"| Gate
+  Hub -->|"self-asserted HUB_BOT label"| Dispatch
+  Owner -->|"approval before submit"| Dispatch
+  Owner -->|"temporary admin key via secure secret input"| Admin
   Dispatch -->|"strict key: submit and poll"| Gate
   Gate --> Worker
   Worker -->|"summary string, untrusted"| Dispatch
   Dispatch -.->|"do not fetch stdout.log or stderr.log"| Gate
-  Dispatch -->|"rotate_bot_key, one rename"| Keys
+  Admin -->|"sudo rotate_bot_key.py, one rename"| Keys
 ```
 
-The dotted arrow is the fetch the dispatcher must not make. Until the MCP redaction gate is fixed, `stdout.log` and `stderr.log` stay on the host.
+The dotted arrow is the fetch the dispatcher must not make. Do not describe the summary or any artifact as redacted. Until the mcp gate redacts every artifact on fetch, `stdout.log` and `stderr.log` stay unfetched. Once that fix has landed, the gate redacts all artifacts on fetch.
 
-| Boundary | What crosses it | What stays out |
+| Boundary | What crosses it | What it is not |
 | --- | --- | --- |
-| Other bots to the hub | A handoff: profile, command or prompt, timeout, goal | The host key, the host address, and any bot name claimed inside the text. The sender is the hub's verified identity (invariants 1 and 3). |
-| Dispatcher to the gate | `submit_task`, `task_status`, `cancel_task`, and a summary of at most 500 characters | `stdout.log` and `stderr.log` until the MCP redaction gate is fixed. Artifact contents are not forwarded to other bots. |
-| Owner to the dispatcher | Allowlist entries, and approval for consequential or networked commands (invariant 4) | Passwords, tokens, and private keys pasted into chat. Those are refused. A temporary admin key arrives through a secure secret input. |
-| Dispatcher to `authorized_keys` | One `rotate_bot_key` replace | A second valid bot key. The new file is renamed into place. A failure before that rename leaves the previous key as the only bot key. Console access is not required. |
+| Other bots to the hub | A handoff: profile, command or prompt, timeout, goal. The hub is a shared Unix user. | A security check. `HUB_BOT` or `--bot` is a self-asserted label. Do not use it to allow, deny, or approve work. |
+| Dispatcher to the gate | `submit_task`, `task_status`, `cancel_task`, and a summary of at most 500 characters, after the owner approves | A fetch of `stdout.log` or `stderr.log` until the gate redacts every artifact. Artifact contents are not forwarded to other bots. |
+| Owner to the dispatcher | Approval of the handoff, including consequential or networked commands (invariant 4) | A password, token, or private key pasted into chat. A temporary admin key arrives through a secure secret input. |
+| Admin session to `authorized_keys` | One root run of `rotate_bot_key.py` after the owner approves. The line keeps `command="/usr/local/bin/sidecomputer-gate",restrict` in strict mode, or `restrict,pty` in open mode. | A gate tool. The bot key cannot run this script. Admin keys stay in the admin user's `authorized_keys`. |
 
 `allow_command: true` on a profile means arbitrary shell as the worker user, and a task can also tamper with the spool and the audit log.
+
+### Known limitations
+
+- The shared hub is cooperative and advisory. Its sender is self-asserted. It is not a basis for security decisions.
+- The mcp gate's tool list is `submit_task`, `task_status`, `list_tasks`, `cancel_task`, `list_profiles`, `request_artifact`, and `health`. There is no rotate tool. Key rotation is the admin script above.
+- Host output is not described as redacted. The redaction claim starts only when the gate redacts every artifact on fetch.
 
 ## Layout
 
