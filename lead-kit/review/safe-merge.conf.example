@@ -1,2 +1,4 @@
 # Trusted shell configuration. Exact owner/repo names, separated by spaces or commas.
 ALLOWED_REPOS="example/project example/another-project"
+# GitHub author logins allowed to provide review evidence (spaces or commas).
+REVIEWER_LOGINS="reviewer-bot"

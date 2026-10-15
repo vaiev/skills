@@ -7,12 +7,18 @@ Copy `safe-merge.conf.example` to `~/.config/lead-kit/safe-merge.conf`, or set
 `SAFE_MERGE_ALLOWED_REPOS` to space/comma separated `owner/repo` names.
 An environment value takes precedence, including an empty value (which refuses
 all merges). `SAFE_MERGE_CONFIG` overrides the config path. The config file is
-trusted shell code defining `ALLOWED_REPOS`.
+trusted shell code defining `ALLOWED_REPOS` and `REVIEWER_LOGINS`.
+
+Set `SAFE_MERGE_REVIEWER_LOGINS` to comma/space separated GitHub author logins,
+or define `REVIEWER_LOGINS` in the config file. The environment takes precedence,
+including an empty value. An empty reviewer allowlist refuses all merges.
+Only reviews and PR comments whose `user.login` is allowlisted count as approval
+or blocking evidence. If all bots share one GitHub account, author checks only stop outsiders, not bot impersonation.
 
 Run:
 
 ```sh
-SAFE_MERGE_ALLOWED_REPOS=example/project ./safe-merge.sh example/project 123 --dry-run
+SAFE_MERGE_ALLOWED_REPOS=example/project SAFE_MERGE_REVIEWER_LOGINS=reviewer-bot ./safe-merge.sh example/project 123 --dry-run
 ```
 
 Bare repository names require `SAFE_MERGE_DEFAULT_OWNER`. `GH_BIN` and `HUB_BIN`
@@ -25,7 +31,9 @@ authentication mechanism.
 The guard requires approval bound to the current head, refuses outstanding
 change requests and blocking bot verdicts, and checks CI. It squash-merges with
 `--match-head-commit`. `--allow-unverified-ci` permits missing/unreadable Actions
-results, but does not bypass reported failures. Missing hub notes are tolerated.
+results, but does not bypass reported failures. Hub notes are advisory: notes
+from the selected reviewer bot can add BLOCK evidence, but never approval.
+Missing hub notes are tolerated.
 
 Run mocked tests with `bash lead-kit/review/tests/test-safe-merge.sh` from the
 repository root.

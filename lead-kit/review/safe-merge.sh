@@ -18,6 +18,14 @@ elif [ -f "$CONFIG" ]; then
 else
   ALLOWED=""
 fi
+if [[ ${SAFE_MERGE_REVIEWER_LOGINS+x} ]]; then
+  REVIEWERS=$SAFE_MERGE_REVIEWER_LOGINS
+elif [ -f "$CONFIG" ]; then
+  REVIEWERS=$( (unset REVIEWER_LOGINS; source "$CONFIG"; printf '%s' "${REVIEWER_LOGINS:-}") )
+else
+  REVIEWERS=""
+fi
+[[ "${REVIEWERS//[,[:space:]]/}" ]] || { echo "REFUSE: empty reviewer login allowlist" >&2; exit 3; }
 read -r -a ALLOWED_LIST <<< "${ALLOWED//,/ }"
 [ ${#ALLOWED_LIST[@]} -gt 0 ] || { echo "REFUSE: empty repository allowlist" >&2; exit 3; }
 REPO="${ARGS[0]}"; PR="${ARGS[1]}"
@@ -43,11 +51,15 @@ json.dump(o,sys.stdout)' > "$TMP/reviews.json"
 "$GH" api "repos/$REPO/issues/$PR/comments?per_page=100" > "$TMP/comments.json"
 "$HUB" --json note search "$REPO#$PR" > "$TMP/hub.json" 2>/dev/null || echo '[]' > "$TMP/hub.json"
 
-python3 - "$HEAD" "$REPO" "$PR" "$TMP" "${SAFE_MERGE_REVIEWER:-Review Bot}" <<'PY' || exit 4
+python3 - "$HEAD" "$REPO" "$PR" "$TMP" "${SAFE_MERGE_REVIEWER:-Review Bot}" "$REVIEWERS" <<'PY' || exit 4
 import json,sys,re
-head,repo,pr,t,reviewer=sys.argv[1:]; short=repo.split('/')[1]
+head,repo,pr,t,reviewer,reviewer_logins=sys.argv[1:]; short=repo.split('/')[1]
 L=lambda f: json.load(open(f"{t}/{f}"))
-revs=L("reviews.json"); coms=L("comments.json")
+allowed=set(re.split(r'[,\s]+', reviewer_logins.strip())) - {''}
+def trusted(item):
+    return (item.get("user") or {}).get("login") in allowed
+revs=[r for r in L("reviews.json") if trusted(r)]
+coms=[c for c in L("comments.json") if trusted(c)]
 try: hub=L("hub.json"); hub=hub if isinstance(hub,list) else hub.get("results",[])
 except Exception: hub=[]
 def cites(body):
@@ -77,8 +89,8 @@ for n in hub:
     if n.get("author_bot")!=reviewer: continue
     txt=(n.get("title","")+"\n"+n.get("body",""))
     if not re.search(re.escape(short)+r'#'+pr+r'\b', txt): continue
-    if 'APPROVE' in txt and not re.search(r'BLOCK|REQUEST_CHANGES',txt):
-        ev.append((n.get("created",""),'APPROVE',cites(txt),"hub note "+str(n.get("id"))))
+    if re.search(r'\b(?:BLOCK|REQUEST_CHANGES|CHANGES_REQUESTED)\b',txt):
+        ev.append((n.get("created",""),'BLOCK',cites(txt),"hub note "+str(n.get("id"))))
 ev.sort()
 if ev and ev[-1][1]=='BLOCK': fail.append(f"latest {reviewer} verdict is BLOCK ({ev[-1][3]})")
 appr=[r for r in revs if r.get("state")=="APPROVED" and r.get("commit_id")==head]
