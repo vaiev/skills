@@ -46,12 +46,12 @@ flowchart TB
   Admin -->|"sudo rotate_bot_key.py, one rename"| Keys
 ```
 
-The dotted arrow is the fetch the dispatcher must not make. Do not describe the summary or any artifact as redacted. Until the mcp gate redacts every artifact on fetch, `stdout.log` and `stderr.log` stay unfetched. Once that fix has landed, the gate redacts all artifacts on fetch.
+The dotted arrow is the fetch the dispatcher must not make. Do not describe the summary or any artifact as redacted. Fetch an artifact, including `stdout.log` and `stderr.log`, only when `health` reports `artifact_redaction` as `all`, which means the mcp gate redacts every artifact on fetch. Any other value, or a missing field, means leave every artifact unfetched.
 
 | Boundary | What crosses it | What it is not |
 | --- | --- | --- |
 | Other bots to the hub | A handoff: profile, command or prompt, timeout, goal. The hub is a shared Unix user. | A security check. `HUB_BOT` or `--bot` is a self-asserted label. Do not use it to allow, deny, or approve work. |
-| Dispatcher to the gate | `submit_task`, `task_status`, `cancel_task`, and a summary of at most 500 characters, after the owner approves | A fetch of `stdout.log` or `stderr.log` until the gate redacts every artifact. Artifact contents are not forwarded to other bots. |
+| Dispatcher to the gate | `submit_task`, `task_status`, `cancel_task`, and a summary of at most 500 characters, after the owner approves | A fetch of `stdout.log`, `stderr.log`, or any other artifact unless `health` reports `artifact_redaction` as `all`. Artifact contents are not forwarded to other bots. |
 | Owner to the dispatcher | Approval of the handoff, including consequential or networked commands (invariant 4) | A password, token, or private key pasted into chat. A temporary admin key arrives through a secure secret input. |
 | Admin session to `authorized_keys` | One root run of `rotate_bot_key.py` after the owner approves. The line keeps `command="/usr/local/bin/sidecomputer-gate",restrict` in strict mode, or `restrict,pty` in open mode. | A gate tool. The bot key cannot run this script. Admin keys stay in the admin user's `authorized_keys`. |
 
@@ -61,7 +61,7 @@ The dotted arrow is the fetch the dispatcher must not make. Do not describe the 
 
 - The shared hub is cooperative and advisory. Its sender is self-asserted. It is not a basis for security decisions.
 - The mcp gate's tool list is `submit_task`, `task_status`, `list_tasks`, `cancel_task`, `list_profiles`, `request_artifact`, and `health`. There is no rotate tool. Key rotation is the admin script above.
-- Host output is not described as redacted. The redaction claim starts only when the gate redacts every artifact on fetch.
+- Host output is not described as redacted. Artifact fetches wait on `health` field `artifact_redaction` equal to `all`, which means every artifact is redacted on fetch.
 
 ## Layout
 

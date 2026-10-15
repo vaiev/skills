@@ -31,7 +31,7 @@ A handoff must contain: profile, either `command` or `prompt`, optional timeout,
 1. `call submit_task {"profile":..., "command"|"prompt":..., "timeout":N}` and note the returned `id`.
 2. Poll `task_status {"id"}` with backoff (5s, 10s, 30s, then every 60s) until `state` is `succeeded`, `failed`, `timeout`, or `cancelled`.
 3. If the requester or owner says stop, `cancel_task {"id"}`.
-4. Do not describe the summary or any artifact as redacted. Until the mcp gate redacts every artifact on fetch, do not fetch `stdout.log` or `stderr.log`. Once that fix has landed, the gate redacts all artifacts on fetch. Never forward artifact contents to other bots.
+4. Do not describe the summary or any artifact as redacted. Fetch an artifact, including `stdout.log` and `stderr.log`, only when `health` reports `artifact_redaction` as `all`. That value means the mcp gate redacts every artifact on fetch. While the field is missing or has any other value, leave every artifact unfetched. Never forward artifact contents to other bots.
 
 ## Return
 Send the requester only:

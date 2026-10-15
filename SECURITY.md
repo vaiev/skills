@@ -11,7 +11,7 @@ The SideComputer host and gate live in the kit at https://github.com/vaiev/mcp/t
 ## Rules the playbooks enforce
 
 - The shared hub is cooperative and advisory. It runs as a shared Unix user, and `HUB_BOT` or `--bot` is self-asserted. Do not use it for security decisions. The owner approves a handoff before submit.
-- Do not describe the summary or any artifact as redacted. Until the mcp gate redacts every artifact on fetch, dispatch does not fetch `stdout.log` or `stderr.log` and does not forward artifact contents. Once that fix has landed, the gate redacts all artifacts on fetch.
+- Do not describe the summary or any artifact as redacted. Dispatch fetches an artifact, including `stdout.log` and `stderr.log`, only when `health` reports `artifact_redaction` as `all`. That value means the mcp gate redacts every artifact on fetch. Otherwise every artifact stays unfetched, and artifact contents are not forwarded.
 - Consequential or networked commands are called out to the owner before submit (invariant 4).
 - Setup secrets come from a secure secret input. A password, token, or private key pasted into chat is refused.
 - There is no gate rotate tool. Bot-key rotation is an admin session with the owner's approval. `sidecomputer/admin/rotate_bot_key.py` runs as root, refuses the sidecomputer user, and keeps the bootstrap `command="/usr/local/bin/sidecomputer-gate",restrict` or `restrict,pty` prefix. A half-finished run leaves the previous key as the only bot key. Admin keys live in the admin user's `authorized_keys`.
