@@ -92,19 +92,21 @@ def key_material(line: str) -> str | None:
     return None
 
 
-def format_bot_line(mode: str, material: str, existing_options: str | None = None) -> str:
-    """Return one authorized_keys line in the bootstrap format for ``mode``."""
+def format_bot_line(mode: str, material: str) -> str:
+    """Return one authorized_keys line with the exact bootstrap prefix for ``mode``."""
     try:
-        required, comment = _MODES[mode]
+        options, comment = _MODES[mode]
     except KeyError as exc:
         raise RotationError("unknown mode; pass strict or open") from exc
-    options = required
-    if existing_options:
-        if existing_options != required and not existing_options.startswith(required + ","):
-            raise RotationError("existing key prefix does not match the requested mode")
-        options = existing_options
     _validate_ed25519_material(material)
     return f"{options} ssh-ed25519 {material} {comment}"
+
+
+def _mode_of_options(options: str) -> str | None:
+    for mode, (required, _comment) in _MODES.items():
+        if options == required or options.startswith(required + ","):
+            return mode
+    return None
 
 
 def _require_admin() -> None:
@@ -140,8 +142,7 @@ def build_authorized_keys(
     bot_material: str | None,
     retire_materials: set[str],
 ) -> str:
-    """Return the full file body: one bootstrap bot line, or empty."""
-    existing_options: str | None = None
+    """Return the full file body: one exact bootstrap bot line, or empty."""
     for raw in existing.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -158,8 +159,8 @@ def build_authorized_keys(
                 "admin keys belong in the admin user's authorized_keys"
             )
         options = _line_options(line)
-        if options:
-            existing_options = options
+        if options and mode is not None and _mode_of_options(options) not in (None, mode):
+            raise RotationError("existing key prefix does not match the requested mode")
 
     if bot_material is None:
         return ""
@@ -167,7 +168,7 @@ def build_authorized_keys(
         raise RotationError("pass --mode strict or --mode open")
     if bot_material in retire_materials:
         raise RotationError("new bot key is also listed for retirement")
-    return format_bot_line(mode, bot_material, existing_options) + "\n"
+    return format_bot_line(mode, bot_material) + "\n"
 
 
 def rotate_bot_key(

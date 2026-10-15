@@ -41,7 +41,9 @@ class ReleaseDocsTest(unittest.TestCase):
         self.assertIn("HUB_BOT", text)
         self.assertIn("security decision", lowered)
         self.assertIn("no rotate tool", lowered)
-        self.assertIn("redacts all artifacts", lowered)
+        self.assertIn("artifact_redaction", text)
+        self.assertIn("as `all`", text)
+        self.assertNotIn("once that fix has landed", lowered)
         self.assertNotIn("verified sender", lowered)
 
     def test_license_is_apache_2(self) -> None:
@@ -60,7 +62,9 @@ class ReleaseDocsTest(unittest.TestCase):
         self.assertIn("until then", security_lower)
         self.assertNotIn("authenticated", security_lower)
         self.assertIn("self-asserted", security_lower)
-        self.assertIn("redacts all artifacts", security_lower)
+        self.assertIn("artifact_redaction", security)
+        self.assertIn("as `all`", security)
+        self.assertNotIn("once that fix has landed", security_lower)
         self.assertIn("python3 -m unittest discover -s tests -v", contributing)
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("python3 -m unittest discover -s tests -v", workflow)

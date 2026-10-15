@@ -35,7 +35,7 @@ Changes to dispatch, setup, or keys keep these rules:
 - The shared hub is cooperative and advisory. `HUB_BOT` is self-asserted. Do not use it for security decisions. The owner approves a handoff before submit.
 - Owner approval for consequential or networked commands (invariant 4).
 - A temporary admin key arrives through a secure secret input. Passwords pasted into chat are refused.
-- Do not describe host output as redacted. `stdout.log` and `stderr.log` stay unfetched until the mcp gate redacts every artifact on fetch.
+- Do not describe host output as redacted. `stdout.log` and `stderr.log` stay unfetched unless `health` reports `artifact_redaction` as `all`, meaning every artifact is redacted on fetch.
 - Key rotation is an admin session with the owner's approval. There is no gate rotate tool. `sidecomputer/admin/rotate_bot_key.py` keeps the bootstrap `command=` and `restrict` prefix, and a half-finished run must leave only the previous bot key valid.
 
 ## Pull requests

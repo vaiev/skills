@@ -115,6 +115,17 @@ class RotateBotKeyTest(unittest.TestCase):
             self._rotate(mode="custom")
         self.assertEqual(self.keys.read_text(encoding="utf-8"), original)
 
+    def test_extra_options_are_replaced_by_the_exact_prefix(self) -> None:
+        extended = (
+            'command="/usr/local/bin/sidecomputer-gate",restrict,pty '
+            f"{OLD} sidecomputer-bot\n"
+        )
+        self._write(extended)
+        self._rotate()
+        body = self.keys.read_text(encoding="utf-8")
+        self.assertEqual(body, _strict(NEW) + "\n")
+        self.assertNotIn(",restrict,pty", body)
+
     def test_mode_mismatch_leaves_the_file_unchanged(self) -> None:
         original = _strict(OLD) + "\n"
         self._write(original)
@@ -219,8 +230,10 @@ class SkillContractTest(unittest.TestCase):
         self.assertIn("security decision", lowered)
         self.assertIn("stdout.log", text)
         self.assertIn("stderr.log", text)
-        self.assertIn("do not fetch", lowered)
-        self.assertIn("redacts all artifacts", lowered)
+        self.assertIn("leave every artifact unfetched", lowered)
+        self.assertIn("artifact_redaction", text)
+        self.assertIn("as `all`", text)
+        self.assertNotIn("once that fix has landed", lowered)
         self.assertIn("owner approves the handoff", lowered)
         self.assertIn("Never forward artifact contents", text)
 
