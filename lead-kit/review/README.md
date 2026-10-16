@@ -49,3 +49,7 @@ branch to WOUFbot / `safe-merge.sh`. The agent prompt requires reading
 ```sh
 ./tdd-loop.sh [--dry-run] [--backend codex|grok|agy] <TASK_ID> "<TASK_DESCRIPTION>"
 ```
+
+Push is blocked in the worktree via worktree-local `core.hooksPath` (not shared remotes).
+Run `bash lead-kit/review/tests/test-tdd-loop-no-push.sh` from the repository root.
+

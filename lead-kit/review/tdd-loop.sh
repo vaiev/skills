@@ -94,23 +94,23 @@ agent() { # agent <prompt-file>
   fi
 }
 
-# Fail closed against any push: invalidate push URLs and install a pre-push hook.
+# Fail closed against any push from THIS worktree only.
+# Use worktree-local core.hooksPath (never shared remotes / never per-worktree
+# gitdir/hooks, which git does not read). Do NOT touch remote.*.url/pushurl.
 guard_no_push_setup() {
   [[ $DRY_RUN -eq 0 ]] || return 0
-  local remote gitdir
-  while IFS= read -r remote; do
-    [[ -n "$remote" ]] || continue
-    git -C "$WT" remote set-url --push "$remote" no_push
-  done < <(git -C "$WT" remote)
-  # Worktree .git is a file; hooks live under the git dir (rev-parse --git-dir).
-  gitdir=$(git -C "$WT" rev-parse --git-dir)
-  mkdir -p "$gitdir/hooks"
-  cat > "$gitdir/hooks/pre-push" <<'HOOK'
+  local hooks
+  hooks="$ART/hooks"
+  mkdir -p "$hooks"
+  cat > "$hooks/pre-push" <<'HOOK'
 #!/usr/bin/env bash
-echo "tdd-loop: push forbidden (pre-push hook)" >&2
+echo "tdd-loop: push forbidden (worktree pre-push hook)" >&2
 exit 1
 HOOK
-  chmod 755 "$gitdir/hooks/pre-push"
+  chmod 755 "$hooks/pre-push"
+  # Enable per-worktree config, then set hooksPath only for this worktree.
+  git -C "$WT" config extensions.worktreeConfig true
+  git -C "$WT" config --worktree core.hooksPath "$hooks"
 }
 
 guard_no_push() {
