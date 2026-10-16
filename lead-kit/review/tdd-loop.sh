@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # tdd-loop.sh — worktree-scoped TDD template (replaces agy-superpowers-loop.sh)
-# Usage: tdd-loop.sh [--dry-run] [--backend codex|grok|agy] <TASK_ID> "<TASK_DESCRIPTION>"
+# Usage: tdd-loop.sh [--dry-run] [--backend codex|grok|agy]
+#                    [--ci-local <path> --ci-local-sha256 <hex>] <TASK_ID> "<TASK_DESCRIPTION>"
+#   ci-local gate (step 3c): runs a PINNED copy of scripts/ci-local.sh outside the
+#   worktree: by default `git show $BASE_REF:scripts/ci-local.sh`; or --ci-local <path>
+#   whose sha256 must equal --ci-local-sha256. The worktree's own copy must be
+#   byte-identical to the pinned one. No pinned script = ABORT (fail closed).
 #
 # Rules (enforced / instructed):
 #   * One git worktree per task: /workspace/vaiev/wt/<TASK_ID>
@@ -22,12 +27,16 @@ DRY_RUN=0
 BACKEND="codex"
 CLI_TIMEOUT="${CLI_TIMEOUT:-1800}"
 
-usage() { echo "Usage: $0 [--dry-run] [--backend codex|grok|agy] <TASK_ID> <TASK_DESCRIPTION>" >&2; exit 2; }
+CI_LOCAL_PATH=""; CI_LOCAL_SHA=""
+
+usage() { echo "Usage: $0 [--dry-run] [--backend codex|grok|agy] [--ci-local <path> --ci-local-sha256 <hex>] <TASK_ID> <TASK_DESCRIPTION>" >&2; exit 2; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --backend) BACKEND="${2:?}"; shift 2 ;;
+    --ci-local) CI_LOCAL_PATH="${2:?}"; shift 2 ;;
+    --ci-local-sha256) CI_LOCAL_SHA="${2:?}"; shift 2 ;;
     -h|--help) usage ;;
     --) shift; break ;;
     -*) usage ;;
@@ -46,6 +55,10 @@ case "$TASK_ID" in
 esac
 [[ "$TASK_ID" != "." ]] || { echo "TASK_ID must not be '.'" >&2; exit 2; }
 case "$BACKEND" in codex|grok|agy) ;; *) usage ;; esac
+if [[ -n "$CI_LOCAL_PATH" || -n "$CI_LOCAL_SHA" ]]; then
+  [[ -n "$CI_LOCAL_PATH" && "$CI_LOCAL_SHA" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "--ci-local and --ci-local-sha256 <64 hex> must be given together" >&2; exit 2; }
+fi
 
 WT="$WT_ROOT/$TASK_ID"
 BRANCH="tdd/$TASK_ID"
@@ -164,6 +177,8 @@ on_exit() {
     fi
   fi
   cleanup_cli_home
+  cleanup_build_home
+  [[ -n "${CI_PIN:-}" ]] && rm -f "$CI_PIN"
   exit "$ec"
 }
 
@@ -187,6 +202,30 @@ run_cli_no_git_creds() {
     GIT_CONFIG_VALUE_0= \
     "$@"
 }
+
+# Run build/test/ci-local (agent-authored code) in a whitelisted env:
+# env -i, temp HOME, no tokens/ssh-agent/askpass, no global/system git config,
+# no VAIEV_* or CI_LOCAL_* from the caller. Only PATH, locale, the toolchain
+# location and the explicitly resolved target dir / validator venv pass through.
+BUILD_HOME=""
+run_isolated() {
+  [[ -n "$BUILD_HOME" && -d "$BUILD_HOME" ]] || { BUILD_HOME=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/tdd-loop-build-home.XXXXXX"); }
+  local rustup_home="${RUSTUP_HOME:-$REAL_HOME/.rustup}" cargo_home="${CARGO_HOME:-$REAL_HOME/.cargo}"
+  local target="${CARGO_TARGET_DIR:-${VAIEV_ROOT:+$VAIEV_ROOT/target}}"
+  local venv="${TDD_CI_LOCAL_VENV:-${VAIEV_TOOLS:+$VAIEV_TOOLS/venv-validate}}"
+  local -a extra=()
+  [[ -n "$target" ]] && extra+=("CARGO_TARGET_DIR=$target")
+  [[ -n "$venv" ]] && extra+=("CI_LOCAL_VENV=$venv")
+  env -i \
+    PATH="$PATH" LANG="${LANG:-C.UTF-8}" TERM="${TERM:-dumb}" TMPDIR="${TMPDIR:-/tmp}" \
+    HOME="$BUILD_HOME" RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home" \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_SSH_COMMAND=/bin/false \
+    GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= \
+    "${extra[@]}" \
+    nice -n 10 ionice -c3 "$@"
+}
+cleanup_build_home() { [[ -n "$BUILD_HOME" && -d "$BUILD_HOME" ]] && rm -rf "$BUILD_HOME"; BUILD_HOME=""; }
 
 # Run agent CLI under timeout; on 429/quota/unavailable, note and exit non-zero.
 # Remote-ref check also runs via EXIT trap (covers timeout/quota exits).
@@ -306,9 +345,9 @@ echo "=== [3] Local verification ==="
 run git -C "$WT" status --short
 (
   if [[ $DRY_RUN -eq 0 ]]; then cd "$WT"; fi
-  run cargo fmt --all --manifest-path runtime/Cargo.toml -- --check
-  run cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets --locked -- -D warnings
-  run cargo test --manifest-path runtime/Cargo.toml --workspace --locked
+  run run_isolated cargo fmt --all --manifest-path runtime/Cargo.toml -- --check
+  run run_isolated cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets --locked -- -D warnings
+  run run_isolated cargo test --manifest-path runtime/Cargo.toml --workspace --locked
 )
 guard_no_push
 
@@ -326,24 +365,40 @@ else
 fi
 guard_no_push
 
-echo "=== [3c] Mandatory pre-push gate: scripts/ci-local.sh (must be GREEN) ==="
-# Mirrors CI (fmt, test, clippy, schema, musl, gitleaks, DCO). Fail closed if absent.
+echo "=== [3c] Mandatory pre-push gate: pinned scripts/ci-local.sh (must be GREEN) ==="
+# Fail closed: run a pinned copy from outside the worktree; the agent-edited
+# worktree copy must be byte-identical; caller CI_LOCAL_* never reaches it.
+CI_PIN=""
 if [[ $DRY_RUN -eq 0 ]]; then
-  if [[ ! -x "$WT/scripts/ci-local.sh" ]]; then
-    echo "ABORT: $WT/scripts/ci-local.sh missing or not executable (no handover without ci-local GREEN)" >&2; exit 1
+  CI_PIN=$(mktemp "${TMPDIR:-/tmp}/ci-local-pinned.XXXXXX")
+  if [[ -n "$CI_LOCAL_PATH" ]]; then
+    cp -- "$CI_LOCAL_PATH" "$CI_PIN" || { echo "ABORT: cannot read --ci-local $CI_LOCAL_PATH" >&2; exit 1; }
+    pin_sha=$(sha256sum "$CI_PIN" | cut -d' ' -f1)
+    [[ "$pin_sha" == "$CI_LOCAL_SHA" ]] || { echo "ABORT: --ci-local sha256 $pin_sha != expected $CI_LOCAL_SHA" >&2; exit 1; }
+  elif ! git -C "$WT" show "$BASE_REF:scripts/ci-local.sh" > "$CI_PIN" 2>/dev/null; then
+    echo "ABORT: $BASE_REF has no scripts/ci-local.sh (sidged #74 not merged yet)." >&2
+    echo "       Pass a reviewed copy: --ci-local <path> --ci-local-sha256 <hex>. No handover without ci-local GREEN." >&2
+    exit 1
   fi
-  ( cd "$WT" && nice -n 10 ./scripts/ci-local.sh ) || { echo "ABORT: ci-local.sh RED; fix before handover" >&2; exit 1; }
+  pin_sha=$(sha256sum "$CI_PIN" | cut -d' ' -f1)
+  wt_sha=$(sha256sum "$WT/scripts/ci-local.sh" 2>/dev/null | cut -d' ' -f1 || true)
+  if [[ "$wt_sha" != "$pin_sha" ]]; then
+    echo "ABORT: worktree scripts/ci-local.sh (${wt_sha:-missing}) differs from pinned ($pin_sha)" >&2; exit 1
+  fi
+  echo "ci-local pinned sha256 $pin_sha"
+  ( cd "$WT" && run_isolated bash "$CI_PIN" ) || { echo "ABORT: ci-local.sh RED; fix before handover" >&2; exit 1; }
 else
-  echo "(dry-run) would run: (cd $WT && nice -n 10 ./scripts/ci-local.sh)"
+  echo "(dry-run) would run the pinned ci-local.sh (isolated env, nice+ionice) in $WT"
 fi
 guard_no_push
 
+if [[ $DRY_RUN -eq 0 ]]; then CI_DOD="[x]"; else CI_DOD="[ ]"; fi
 cat <<DOD
 === [4] DoD checklist (verify manually before handover) ===
 [ ] Tests written first and seen failing (RED)
 [ ] All tests green (cargo test --manifest-path runtime/Cargo.toml --workspace --locked)
 [ ] fmt + clippy -D warnings clean
-[x] scripts/ci-local.sh GREEN on the handover SHA (enforced in step 3c)
+$CI_DOD scripts/ci-local.sh GREEN on the handover SHA (step 3c)
 [ ] Checked against $INVARIANTS (all 9), deviations listed in $PLAN
 [ ] Single concern, commits DCO-signed (-s) by this script
 [ ] No secrets in diff or $LOG

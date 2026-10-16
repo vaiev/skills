@@ -24,3 +24,4 @@ jobs:
 
       - name: tdd-loop no-push guard
         run: bash lead-kit/review/tests/test-tdd-loop-no-push.sh
+        run: bash lead-kit/review/tests/test-tdd-loop-ci-local.sh
