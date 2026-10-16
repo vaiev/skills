@@ -21,4 +21,5 @@ Code, comments, specs, commit messages and PRs: English.
 ## Layout
 - `sidecomputer/{admin,dispatch,getting-started}/SKILL.md`: skills
 - `sidecomputer/admin/rotate_bot_key.py`: key rotation helper
+- `platform/<skill>/SKILL.md`: platform playbooks (cloud, DNS, backups, secrets, project start)
 - `tests/`: test suite
