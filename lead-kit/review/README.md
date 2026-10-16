@@ -50,6 +50,6 @@ branch to WOUFbot / `safe-merge.sh`. The agent prompt requires reading
 ./tdd-loop.sh [--dry-run] [--backend codex|grok|agy] <TASK_ID> "<TASK_DESCRIPTION>"
 ```
 
-Primary no-push controls: the CLI runs with git credentials stripped (no `GH_TOKEN`/`GITHUB_TOKEN`/`VAIEV_GH_TOKEN`/`SSH_AUTH_SOCK`, `GIT_ASKPASS=/bin/false`, empty `credential.helper`), and after each step the script compares `git ls-remote` to a pre-step snapshot (fail-closed on any change). A worktree-local `core.hooksPath` pre-push hook remains as defense in depth only.
+Primary no-push controls: the CLI runs in a fresh empty `HOME` with empty `XDG_CONFIG_HOME`/`GH_CONFIG_DIR`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, SSH blocked (`GIT_SSH_COMMAND=/bin/false`, no `SSH_AUTH_SOCK`), tokens unset, and empty `credential.helper`. Only whitelisted CLI auth dirs (`.codex` / `.grok` / `.agy`, plus `.config/agy` into the temp XDG) are copied in — never `.git-credentials`, `.config/gh`, or `.ssh`. After each step and on `EXIT` (timeout/quota/auth), `git ls-remote` is compared to a pre-step snapshot (fail-closed). A worktree-local `core.hooksPath` pre-push hook remains as defense in depth only.
 Run `bash lead-kit/review/tests/test-tdd-loop-no-push.sh` from the repository root (also in CI).
 

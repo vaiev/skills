@@ -10,7 +10,8 @@
 #   * NEVER push, merge or force-push. Handover to WOUFbot / safe-merge only.
 #   * No skip-permissions flags. No secrets in logs (env is never echoed).
 #   * CLI prompts say "do not commit"; this script commits with -s after green tests.
-#   * CLI runs without git credentials; remote refs are snapshotted and re-checked.
+#   * CLI runs in a fresh HOME with only whitelisted CLI auth dirs; remote refs
+#     are snapshotted and re-checked (including on EXIT).
 set -euo pipefail
 
 REPO="${SIDGED_REPO:-/workspace/vaiev/sidged}"
@@ -52,6 +53,9 @@ ART="$WT/.tdd"
 PLAN="$ART/plan.md"
 LOG="$ART/run.log"
 REFS_SNAP="$ART/remote-refs.snap"
+CLI_HOME=""
+PROMPT1=""; PROMPT2=""
+REAL_HOME="${HOME:-}"
 
 # run: print the command; execute only when not dry-run. Never prints env.
 run() {
@@ -70,11 +74,10 @@ redact() {
 
 # Collect ls-remote for every remote (sorted). Fail closed on ls-remote error.
 collect_remote_refs() {
-  local remote out
+  local remote out refs
   out=""
   while IFS= read -r remote; do
     [[ -n "$remote" ]] || continue
-    # Prefer fetch URL; do not print it beyond the label.
     if ! refs=$(git -C "$WT" ls-remote "$remote" 2>/dev/null); then
       echo "ABORT: git ls-remote failed for remote '$remote' (fail-closed)" >&2
       return 1
@@ -91,18 +94,19 @@ snapshot_remote_refs() {
   collect_remote_refs > "$REFS_SNAP"
 }
 
+# Return 0 if unchanged, 1 if changed/error (does not exit — for trap use).
 assert_remote_refs_unchanged() {
   [[ $DRY_RUN -eq 0 ]] || return 0
   local now
   now=$(mktemp)
   if ! collect_remote_refs > "$now"; then
     rm -f "$now"
-    exit 1
+    return 1
   fi
   if [[ ! -f "$REFS_SNAP" ]]; then
     echo "ABORT: missing remote-refs snapshot at $REFS_SNAP" >&2
     rm -f "$now"
-    exit 1
+    return 1
   fi
   if ! cmp -s "$REFS_SNAP" "$now"; then
     echo "ABORT: remote refs changed during tdd-loop (push detected; fail-closed)" >&2
@@ -111,18 +115,67 @@ assert_remote_refs_unchanged() {
     echo "--- after ---" >&2
     cat "$now" >&2 || true
     rm -f "$now"
-    exit 1
+    return 1
   fi
   rm -f "$now"
+  return 0
 }
 
-# Run agent CLI with NO git credentials. Hook is defense in depth only.
-# env strips tokens/askpass/ssh-agent; GIT_CONFIG_* clears credential.helper.
+# Fresh HOME for the CLI: empty XDG/GH config, no system/global git config,
+# SSH blocked. Whitelist-copy only CLI auth dirs (.codex / .grok / .agy).
+# Never copy ~/.git-credentials, ~/.config/gh, ~/.ssh.
+prepare_cli_home() {
+  local src dst
+  CLI_HOME=$(mktemp -d)
+  mkdir -p "$CLI_HOME/.xdg-config" "$CLI_HOME/.gh-config"
+  if [[ -n "$REAL_HOME" && -d "$REAL_HOME" ]]; then
+    for src in .codex .grok .agy; do
+      if [[ -e "$REAL_HOME/$src" ]]; then
+        dst="$CLI_HOME/$src"
+        cp -a "$REAL_HOME/$src" "$dst"
+      fi
+    done
+    # agy may keep auth under XDG; copy only that subdir into the empty XDG tree.
+    if [[ -e "$REAL_HOME/.config/agy" ]]; then
+      mkdir -p "$CLI_HOME/.xdg-config"
+      cp -a "$REAL_HOME/.config/agy" "$CLI_HOME/.xdg-config/agy"
+    fi
+  fi
+}
+
+cleanup_cli_home() {
+  if [[ -n "${CLI_HOME:-}" && -d "$CLI_HOME" ]]; then
+    rm -rf "$CLI_HOME"
+    CLI_HOME=""
+  fi
+}
+
+on_exit() {
+  local ec=$?
+  rm -f "${PROMPT1:-}" "${PROMPT2:-}"
+  if [[ $DRY_RUN -eq 0 && -n "${REFS_SNAP:-}" && -f "$REFS_SNAP" ]]; then
+    if ! assert_remote_refs_unchanged; then
+      cleanup_cli_home
+      exit 1
+    fi
+  fi
+  cleanup_cli_home
+  exit "$ec"
+}
+
+# Run agent CLI with NO git credentials and an isolated HOME.
 run_cli_no_git_creds() {
-  # Intentionally does not forward GH_TOKEN / GITHUB_TOKEN / VAIEV_GH_TOKEN /
-  # SSH_AUTH_SOCK / GIT_ASKPASS from the parent. Never print env.
+  [[ -n "$CLI_HOME" && -d "$CLI_HOME" ]] || prepare_cli_home
+  # Never print env. Strip tokens/askpass/ssh-agent; block SSH; ignore
+  # system/global git config; empty credential.helper.
   env -u GH_TOKEN -u GITHUB_TOKEN -u VAIEV_GH_TOKEN -u SSH_AUTH_SOCK -u GIT_ASKPASS \
     -u GIT_CONFIG_PARAMETERS \
+    HOME="$CLI_HOME" \
+    XDG_CONFIG_HOME="$CLI_HOME/.xdg-config" \
+    GH_CONFIG_DIR="$CLI_HOME/.gh-config" \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_SSH_COMMAND=/bin/false \
     GIT_TERMINAL_PROMPT=0 \
     GIT_ASKPASS=/bin/false \
     GIT_CONFIG_COUNT=1 \
@@ -132,6 +185,7 @@ run_cli_no_git_creds() {
 }
 
 # Run agent CLI under timeout; on 429/quota/unavailable, note and exit non-zero.
+# Remote-ref check also runs via EXIT trap (covers timeout/quota exits).
 agent() { # agent <prompt-file>
   local pf="$1" out rc=0
   out=$(mktemp)
@@ -157,7 +211,7 @@ agent() { # agent <prompt-file>
       rm -f "$out"; exit 1
     fi
     rm -f "$out"
-    assert_remote_refs_unchanged
+    assert_remote_refs_unchanged || exit 1
     return "$rc"
   else
     redact < "$out" || true
@@ -185,7 +239,7 @@ guard_no_push() {
   if [[ $DRY_RUN -eq 0 ]] && git -C "$WT" rev-parse --abbrev-ref "@{u}" >/dev/null 2>&1; then
     echo "ABORT: branch $BRANCH has an upstream; pushing is forbidden in this loop." >&2; exit 1
   fi
-  assert_remote_refs_unchanged
+  assert_remote_refs_unchanged || exit 1
 }
 
 echo "=== tdd-loop: task=$TASK_ID backend=$BACKEND dry_run=$DRY_RUN timeout=${CLI_TIMEOUT}s ==="
@@ -212,9 +266,9 @@ if [[ $DRY_RUN -eq 0 ]]; then
 fi
 guard_no_push_setup
 snapshot_remote_refs
+prepare_cli_home
+trap on_exit EXIT
 
-PROMPT1=""; PROMPT2=""
-trap 'rm -f "$PROMPT1" "$PROMPT2"' EXIT
 PROMPT1="$(mktemp)"; PROMPT2="$(mktemp)"
 cat > "$PROMPT1" <<P1
 [PLAN ONLY — do not modify source files]
