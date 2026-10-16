@@ -326,11 +326,24 @@ else
 fi
 guard_no_push
 
+echo "=== [3c] Mandatory pre-push gate: scripts/ci-local.sh (must be GREEN) ==="
+# Mirrors CI (fmt, test, clippy, schema, musl, gitleaks, DCO). Fail closed if absent.
+if [[ $DRY_RUN -eq 0 ]]; then
+  if [[ ! -x "$WT/scripts/ci-local.sh" ]]; then
+    echo "ABORT: $WT/scripts/ci-local.sh missing or not executable (no handover without ci-local GREEN)" >&2; exit 1
+  fi
+  ( cd "$WT" && nice -n 10 ./scripts/ci-local.sh ) || { echo "ABORT: ci-local.sh RED; fix before handover" >&2; exit 1; }
+else
+  echo "(dry-run) would run: (cd $WT && nice -n 10 ./scripts/ci-local.sh)"
+fi
+guard_no_push
+
 cat <<DOD
 === [4] DoD checklist (verify manually before handover) ===
 [ ] Tests written first and seen failing (RED)
 [ ] All tests green (cargo test --manifest-path runtime/Cargo.toml --workspace --locked)
 [ ] fmt + clippy -D warnings clean
+[x] scripts/ci-local.sh GREEN on the handover SHA (enforced in step 3c)
 [ ] Checked against $INVARIANTS (all 9), deviations listed in $PLAN
 [ ] Single concern, commits DCO-signed (-s) by this script
 [ ] No secrets in diff or $LOG
