@@ -37,3 +37,15 @@ Missing hub notes are tolerated.
 
 Run mocked tests with `bash lead-kit/review/tests/test-safe-merge.sh` from the
 repository root.
+
+## TDD loop
+
+`tdd-loop.sh` is a worktree-per-task TDD helper for Sidged implementation work.
+Codex is the default backend; `grok` and `agy` are optional. It never pushes or
+merges: after RED → GREEN → REFACTOR and a DCO-signed local commit it hands the
+branch to WOUFbot / `safe-merge.sh`. The agent prompt requires reading
+`INVARIANTS.md`.
+
+```sh
+./tdd-loop.sh [--dry-run] [--backend codex|grok|agy] <TASK_ID> "<TASK_DESCRIPTION>"
+```
