@@ -99,6 +99,19 @@ Use these paths when another repository links here. The same table is in [`sidec
 
 The dispatch playbook is `vaiev/skills/sidecomputer/dispatch/SKILL.md`.
 
+## Platform skills
+
+Playbooks for cloud, own name servers, backups, secrets and starting a project with [vaiev/guardrails](https://github.com/vaiev/guardrails). Index with canonical paths: [`platform/README.md`](platform/README.md).
+
+| Skill | Use when |
+| --- | --- |
+| `platform/openstack-cloud` | OpenStack cloud with OpenTofu: wrapper, quotas, resizes, costs, object storage |
+| `platform/knot-dnssec` | Own name servers with Knot DNS and automatic DNSSEC, key backup |
+| `platform/dns-cutover` | Moving zones without SERVFAIL: glue, DS, NS order and waits |
+| `platform/postgres-dual-backup` | pgBackRest PITR plus age-encrypted dumps and the restore drill |
+| `platform/sops-secrets` | Secrets: store outside the repo, SOPS + age, wrappers, rotation |
+| `platform/project-starter` | A new project: guardrails, stack evaluation, setup order |
+
 ## Development
 
 ```bash
