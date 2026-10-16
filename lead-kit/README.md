@@ -6,14 +6,16 @@ Tools and rules for the bots working on `vaiev/sidged`. Details per tool live in
 ## Pre-push flow (mandatory)
 
 1. **Worktree.** One worktree per task or bot, branched from current `origin/main`.
-   Never work on `main` directly. On the VPS each bot has its own worktree under
-   `/srv/vaiev` (see below); on a box use `git worktree add`.
-2. **ci-local GREEN.** Run `scripts/ci-local.sh` in the worktree (VPS:
-   `/srv/vaiev/bin/ci-local`). It mirrors CI (`rust-ci.yml`, `validate.yml`):
+   Never work on `main` directly (`git worktree add`).
+2. **ci-local GREEN.** Run `scripts/ci-local.sh` in the worktree. It mirrors CI (`rust-ci.yml`, `validate.yml`):
    `cargo fmt --check`, `cargo test --workspace`, `cargo clippy --all-targets -D warnings`,
    schema validation + unittest, static musl build, gitleaks on `origin/main..HEAD`,
    DCO check, and actionlint if installed. Any failure exits non-zero. `tdd-loop.sh`
-   enforces this gate (step 3c) and refuses handover when it is RED.
+   enforces this gate (step 3c) with a pinned copy (from `origin/main`, or
+   `--ci-local <path> --ci-local-sha256 <hex>`) in an isolated env, and refuses
+   handover when it is RED or the worktree copy was changed. Until sidged #74 is
+   merged, `origin/main` has no ci-local.sh and step 3c refuses unless the explicit
+   pin is passed.
 3. **DCO.** Every commit carries `Signed-off-by:` (`git commit -s`).
 4. **Hand the SHA to WOUFbot.** Report branch, base SHA and head SHA. Bots never
    push, merge or force-push; WOUFbot pushes.
@@ -21,17 +23,13 @@ Tools and rules for the bots working on `vaiev/sidged`. Details per tool live in
 6. **Merge only via `safe-merge.sh`** (approval bound to the head, CI checked,
    `--match-head-commit`).
 
-## Shared VPS workspace
+## Shared workspace
 
-- Root: `/srv/vaiev` (`root:vaiev-bots`, `2770`, setgid). Bare repo `sidged.git`,
-  worktrees `wt-sidged`, `wt-exec`, `wt-review`, `wt-status`, `wt-lead`.
-- Toolchain: `/opt/vaiev-tools` (rustup 1.89.0 + clippy/rustfmt + musl targets,
-  pinned gitleaks), group `vaiev-bots`, not world-readable.
-- Strictly separate from the CI runner (`ghrunner`, own home, not in `vaiev-bots`),
-  from `/run/sidged` and from the approver. CI checks out fresh from GitHub and
-  never uses `/srv/vaiev`.
-- No GitHub token on the VPS. Code arrives as a git bundle from a box clone.
-- Keep load low: the runner shares the CPU. `ci-local` runs under `nice`/`ionice`
-  with `CI_LOCAL_JOBS=2` by default. No training on the VPS or the box.
-- codex/agy logins and credentials live per bot in that bot's own home, never in
-  `/srv/vaiev`.
+- Bots work in their own worktrees of one shared clone, under a dedicated group.
+  The CI runner is a separate, unprivileged account with no access to it; CI
+  always checks out fresh from GitHub.
+- No GitHub token on shared hosts. WOUFbot pushes.
+- Keep load low on hosts shared with the runner (`nice`/`ionice`, low `-j`).
+  No training on shared hosts.
+- codex/agy logins live per bot in that bot's own home, never in the shared workspace.
+- Host layout (paths, users, modes) is kept in the private ops notes, not here.
