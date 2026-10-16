@@ -10,6 +10,7 @@
 #   * NEVER push, merge or force-push. Handover to WOUFbot / safe-merge only.
 #   * No skip-permissions flags. No secrets in logs (env is never echoed).
 #   * CLI prompts say "do not commit"; this script commits with -s after green tests.
+#   * CLI runs without git credentials; remote refs are snapshotted and re-checked.
 set -euo pipefail
 
 REPO="${SIDGED_REPO:-/workspace/vaiev/sidged}"
@@ -42,7 +43,6 @@ TASK_ID="${1:-}"; TASK_DESC="${2:-}"
 case "$TASK_ID" in
   *..*|*/*|*\\*) echo "TASK_ID must not contain '..' or path separators" >&2; exit 2 ;;
 esac
-# Also refuse '.' alone and leading/trailing pathy forms already caught above.
 [[ "$TASK_ID" != "." ]] || { echo "TASK_ID must not be '.'" >&2; exit 2; }
 case "$BACKEND" in codex|grok|agy) ;; *) usage ;; esac
 
@@ -51,6 +51,7 @@ BRANCH="tdd/$TASK_ID"
 ART="$WT/.tdd"
 PLAN="$ART/plan.md"
 LOG="$ART/run.log"
+REFS_SNAP="$ART/remote-refs.snap"
 
 # run: print the command; execute only when not dry-run. Never prints env.
 run() {
@@ -67,14 +68,83 @@ redact() {
   sed -E "s/(${_ghp}[A-Za-z0-9]{20,}|gh[ousr]_[A-Za-z0-9]{20,}|${_sk}[A-Za-z0-9_-]{20,}|${_xai}[A-Za-z0-9]{20,}|(api[_-]?key|token|secret|password)[\"=: ]+[^ \"]+)/[REDACTED]/Ig"
 }
 
+# Collect ls-remote for every remote (sorted). Fail closed on ls-remote error.
+collect_remote_refs() {
+  local remote out
+  out=""
+  while IFS= read -r remote; do
+    [[ -n "$remote" ]] || continue
+    # Prefer fetch URL; do not print it beyond the label.
+    if ! refs=$(git -C "$WT" ls-remote "$remote" 2>/dev/null); then
+      echo "ABORT: git ls-remote failed for remote '$remote' (fail-closed)" >&2
+      return 1
+    fi
+    out+=$(printf 'REMOTE %s\n%s\n' "$remote" "$(printf '%s\n' "$refs" | LC_ALL=C sort)")
+    out+=$'\n'
+  done < <(git -C "$WT" remote)
+  printf '%s' "$out"
+}
+
+snapshot_remote_refs() {
+  [[ $DRY_RUN -eq 0 ]] || return 0
+  mkdir -p "$ART"
+  collect_remote_refs > "$REFS_SNAP"
+}
+
+assert_remote_refs_unchanged() {
+  [[ $DRY_RUN -eq 0 ]] || return 0
+  local now
+  now=$(mktemp)
+  if ! collect_remote_refs > "$now"; then
+    rm -f "$now"
+    exit 1
+  fi
+  if [[ ! -f "$REFS_SNAP" ]]; then
+    echo "ABORT: missing remote-refs snapshot at $REFS_SNAP" >&2
+    rm -f "$now"
+    exit 1
+  fi
+  if ! cmp -s "$REFS_SNAP" "$now"; then
+    echo "ABORT: remote refs changed during tdd-loop (push detected; fail-closed)" >&2
+    echo "--- before ---" >&2
+    cat "$REFS_SNAP" >&2 || true
+    echo "--- after ---" >&2
+    cat "$now" >&2 || true
+    rm -f "$now"
+    exit 1
+  fi
+  rm -f "$now"
+}
+
+# Run agent CLI with NO git credentials. Hook is defense in depth only.
+# env strips tokens/askpass/ssh-agent; GIT_CONFIG_* clears credential.helper.
+run_cli_no_git_creds() {
+  # Intentionally does not forward GH_TOKEN / GITHUB_TOKEN / VAIEV_GH_TOKEN /
+  # SSH_AUTH_SOCK / GIT_ASKPASS from the parent. Never print env.
+  env -u GH_TOKEN -u GITHUB_TOKEN -u VAIEV_GH_TOKEN -u SSH_AUTH_SOCK -u GIT_ASKPASS \
+    -u GIT_CONFIG_PARAMETERS \
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_ASKPASS=/bin/false \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=credential.helper \
+    GIT_CONFIG_VALUE_0= \
+    "$@"
+}
+
 # Run agent CLI under timeout; on 429/quota/unavailable, note and exit non-zero.
 agent() { # agent <prompt-file>
   local pf="$1" out rc=0
   out=$(mktemp)
   case "$BACKEND" in
-    codex) run timeout "$CLI_TIMEOUT" codex exec --sandbox workspace-write --cd "$WT" - < "$pf" >"$out" 2>&1 || rc=$? ;;
-    grok)  run timeout "$CLI_TIMEOUT" grok --cwd "$WT" --prompt-file "$pf" >"$out" 2>&1 || rc=$? ;;
-    agy)   run timeout "$CLI_TIMEOUT" env -C "$WT" agy --sandbox --print "$(cat "$pf")" >"$out" 2>&1 || rc=$? ;;
+    codex)
+      run run_cli_no_git_creds timeout "$CLI_TIMEOUT" codex exec --sandbox workspace-write --cd "$WT" - < "$pf" >"$out" 2>&1 || rc=$?
+      ;;
+    grok)
+      run run_cli_no_git_creds timeout "$CLI_TIMEOUT" grok --cwd "$WT" --prompt-file "$pf" >"$out" 2>&1 || rc=$?
+      ;;
+    agy)
+      run run_cli_no_git_creds timeout "$CLI_TIMEOUT" env -C "$WT" agy --sandbox --print "$(cat "$pf")" >"$out" 2>&1 || rc=$?
+      ;;
   esac
   if [[ $DRY_RUN -eq 0 ]]; then
     redact < "$out" | tee -a "$LOG"
@@ -87,6 +157,7 @@ agent() { # agent <prompt-file>
       rm -f "$out"; exit 1
     fi
     rm -f "$out"
+    assert_remote_refs_unchanged
     return "$rc"
   else
     redact < "$out" || true
@@ -94,9 +165,7 @@ agent() { # agent <prompt-file>
   fi
 }
 
-# Fail closed against any push from THIS worktree only.
-# Use worktree-local core.hooksPath (never shared remotes / never per-worktree
-# gitdir/hooks, which git does not read). Do NOT touch remote.*.url/pushurl.
+# Defense in depth: worktree-local pre-push hook (not the primary control).
 guard_no_push_setup() {
   [[ $DRY_RUN -eq 0 ]] || return 0
   local hooks
@@ -108,7 +177,6 @@ echo "tdd-loop: push forbidden (worktree pre-push hook)" >&2
 exit 1
 HOOK
   chmod 755 "$hooks/pre-push"
-  # Enable per-worktree config, then set hooksPath only for this worktree.
   git -C "$WT" config extensions.worktreeConfig true
   git -C "$WT" config --worktree core.hooksPath "$hooks"
 }
@@ -117,6 +185,7 @@ guard_no_push() {
   if [[ $DRY_RUN -eq 0 ]] && git -C "$WT" rev-parse --abbrev-ref "@{u}" >/dev/null 2>&1; then
     echo "ABORT: branch $BRANCH has an upstream; pushing is forbidden in this loop." >&2; exit 1
   fi
+  assert_remote_refs_unchanged
 }
 
 echo "=== tdd-loop: task=$TASK_ID backend=$BACKEND dry_run=$DRY_RUN timeout=${CLI_TIMEOUT}s ==="
@@ -136,13 +205,13 @@ else
   run git -C "$REPO" worktree add -b "$BRANCH" "$WT" "$BASE_REF"
 fi
 run mkdir -p "$ART"
-# Keep artefacts out of commits
 if [[ $DRY_RUN -eq 0 ]]; then
   excl=$(git -C "$WT" rev-parse --git-path info/exclude)
   mkdir -p "$(dirname "$excl")"
   grep -qxF '.tdd/' "$excl" 2>/dev/null || echo '.tdd/' >> "$excl"
 fi
 guard_no_push_setup
+snapshot_remote_refs
 
 PROMPT1=""; PROMPT2=""
 trap 'rm -f "$PROMPT1" "$PROMPT2"' EXIT
@@ -166,7 +235,6 @@ Do not commit. Never git push / merge / force-push.
 Do not print environment variables or secrets.
 P2
 
-# Drop stale plan so step-1 emptiness check is meaningful
 [[ $DRY_RUN -eq 0 && -f "$PLAN" ]] && rm -f "$PLAN"
 
 echo "=== [1] Plan + invariant check (output -> $PLAN) ==="
@@ -190,7 +258,6 @@ echo "=== [3b] Local DCO commit (script-owned; CLI must not commit) ==="
 if [[ $DRY_RUN -eq 0 ]]; then
   if [[ -n "$(git -C "$WT" status --porcelain)" ]]; then
     git -C "$WT" add -A
-    # Unstage .tdd if somehow added
     git -C "$WT" reset -q HEAD -- .tdd 2>/dev/null || true
     git -C "$WT" commit -s -m "tdd($TASK_ID): $TASK_DESC"
   else

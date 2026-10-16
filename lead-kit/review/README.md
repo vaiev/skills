@@ -50,6 +50,6 @@ branch to WOUFbot / `safe-merge.sh`. The agent prompt requires reading
 ./tdd-loop.sh [--dry-run] [--backend codex|grok|agy] <TASK_ID> "<TASK_DESCRIPTION>"
 ```
 
-Push is blocked in the worktree via worktree-local `core.hooksPath` (not shared remotes).
-Run `bash lead-kit/review/tests/test-tdd-loop-no-push.sh` from the repository root.
+Primary no-push controls: the CLI runs with git credentials stripped (no `GH_TOKEN`/`GITHUB_TOKEN`/`VAIEV_GH_TOKEN`/`SSH_AUTH_SOCK`, `GIT_ASKPASS=/bin/false`, empty `credential.helper`), and after each step the script compares `git ls-remote` to a pre-step snapshot (fail-closed on any change). A worktree-local `core.hooksPath` pre-push hook remains as defense in depth only.
+Run `bash lead-kit/review/tests/test-tdd-loop-no-push.sh` from the repository root (also in CI).
 

@@ -21,3 +21,6 @@ jobs:
 
       - name: Run tests
         run: python3 -m unittest discover -s tests -v
+
+      - name: tdd-loop no-push guard
+        run: bash lead-kit/review/tests/test-tdd-loop-no-push.sh
