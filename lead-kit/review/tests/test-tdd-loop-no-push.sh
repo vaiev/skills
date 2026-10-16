@@ -31,7 +31,7 @@ printf '[workspace]\nmembers = []\n' > "$ROOT/runtime/Cargo.toml"
 FAKE_HOME="$ROOT/fake-home"
 mkdir -p "$FAKE_HOME/.codex" "$FAKE_HOME/.grok" "$FAKE_HOME/.agy" \
   "$FAKE_HOME/.config/gh" "$FAKE_HOME/.ssh" "$FAKE_HOME/.config/agy"
-echo 'https://x-access-token:LEAKED_GIT_CRED@github.com' > "$FAKE_HOME/.git-credentials"
+echo 'https://user:LEAKED_GIT_CRED@github.com' > "$FAKE_HOME/.git-credentials"
 echo 'LEAKED_GH_CONFIG' > "$FAKE_HOME/.config/gh/hosts.yml"
 echo 'LEAKED_SSH_KEY' > "$FAKE_HOME/.ssh/id_ed25519"
 echo 'CODEX_AUTH_OK' > "$FAKE_HOME/.codex/auth.json"

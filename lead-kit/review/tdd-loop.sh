@@ -125,8 +125,10 @@ assert_remote_refs_unchanged() {
 # SSH blocked. Whitelist-copy only CLI auth dirs (.codex / .grok / .agy).
 # Never copy ~/.git-credentials, ~/.config/gh, ~/.ssh.
 prepare_cli_home() {
-  local src dst
-  CLI_HOME=$(mktemp -d)
+  local src dst old_umask
+  # umask 077: copied login material must not be group/world readable.
+  old_umask=$(umask); umask 077
+  CLI_HOME=$(mktemp -d "${TMPDIR:-/tmp}/tdd-loop-cli-home.XXXXXX")
   mkdir -p "$CLI_HOME/.xdg-config" "$CLI_HOME/.gh-config"
   if [[ -n "$REAL_HOME" && -d "$REAL_HOME" ]]; then
     for src in .codex .grok .agy; do
@@ -141,6 +143,8 @@ prepare_cli_home() {
       cp -a "$REAL_HOME/.config/agy" "$CLI_HOME/.xdg-config/agy"
     fi
   fi
+  chmod -R go-rwx "$CLI_HOME"
+  umask "$old_umask"
 }
 
 cleanup_cli_home() {
