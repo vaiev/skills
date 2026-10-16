@@ -8,7 +8,7 @@ ok() { echo "PASS $1"; pass=$((pass+1)); }
 bad() { echo "FAIL $1"; shift; printf '%s\n' "$@" | tail -40; fail=$((fail+1)); }
 
 ROOT=$(mktemp -d)
-trap 'rm -rf "$ROOT"' EXIT
+trap 'rm -rf "$ROOT" "$ROOT/../pin-ci-local-$$.sh"' EXIT
 git -C "$ROOT" init -q
 git -C "$ROOT" config user.email t@t
 git -C "$ROOT" config user.name t
@@ -97,9 +97,13 @@ export GITHUB_TOKEN=fake-github-token-should-be-stripped
 export VAIEV_GH_TOKEN=fake-vaiev-token-should-be-stripped
 export SSH_AUTH_SOCK=/tmp/fake-ssh-agent.sock
 
+# Step 3c pin is snapshotted before the agent runs; give it an explicit pin
+# (this repo has no scripts/ci-local.sh, so 3c later aborts: loop_rc=1 expected).
+PINF="$ROOT/../pin-ci-local-$$.sh"; printf '#!/bin/sh\nexit 0\n' > "$PINF"
+PINSHA=$(sha256sum "$PINF" | cut -d' ' -f1)
 set +e
 INVARIANTS="$INV" SIDGED_REPO="$ROOT" WT_ROOT="$WTROOT" BASE_REF=HEAD CLI_TIMEOUT=30 \
-  "$LOOP" --backend codex m3np 'block push' >"$ROOT/loop.log" 2>&1
+  "$LOOP" --backend codex --ci-local "$PINF" --ci-local-sha256 "$PINSHA" m3np 'block push' >"$ROOT/loop.log" 2>&1
 loop_rc=$?
 set -e
 
@@ -211,7 +215,7 @@ chmod 755 "$BIN/codex"
 
 set +e
 INVARIANTS="$INV" SIDGED_REPO="$ROOT" WT_ROOT="$WT2ROOT" BASE_REF=HEAD CLI_TIMEOUT=30 \
-  "$LOOP" --backend codex m3trap 'trap test' >"$ROOT/trap.log" 2>&1
+  "$LOOP" --backend codex --ci-local "$PINF" --ci-local-sha256 "$PINSHA" m3trap 'trap test' >"$ROOT/trap.log" 2>&1
 trap_rc=$?
 set -e
 if [[ $trap_rc -ne 0 ]] && grep -q 'remote refs changed\|push detected\|fail-closed\|timed out' "$ROOT/trap.log"; then

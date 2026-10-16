@@ -173,12 +173,14 @@ on_exit() {
   if [[ $DRY_RUN -eq 0 && -n "${REFS_SNAP:-}" && -f "$REFS_SNAP" ]]; then
     if ! assert_remote_refs_unchanged; then
       cleanup_cli_home
+      cleanup_build_home
+      cleanup_pin
       exit 1
     fi
   fi
   cleanup_cli_home
   cleanup_build_home
-  [[ -n "${CI_PIN:-}" ]] && rm -f "$CI_PIN"
+  cleanup_pin
   exit "$ec"
 }
 
@@ -210,7 +212,16 @@ run_cli_no_git_creds() {
 BUILD_HOME=""
 run_isolated() {
   [[ -n "$BUILD_HOME" && -d "$BUILD_HOME" ]] || { BUILD_HOME=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/tdd-loop-build-home.XXXXXX"); }
-  local rustup_home="${RUSTUP_HOME:-$REAL_HOME/.rustup}" cargo_home="${CARGO_HOME:-$REAL_HOME/.cargo}"
+  local rustup_home="${RUSTUP_HOME:-$REAL_HOME/.rustup}" real_cargo="${CARGO_HOME:-$REAL_HOME/.cargo}"
+  # Clean CARGO_HOME: never the real one (credentials.toml, config with tokens).
+  # Only the registry download cache and index are linked in, so crates are not
+  # fetched again. Same uid: the links are writable; protection against accidents only.
+  local cargo_home="$BUILD_HOME/.cargo"
+  if [[ ! -d "$cargo_home" ]]; then
+    mkdir -p "$cargo_home/registry"
+    [[ -d "$real_cargo/registry/cache" ]] && ln -s "$real_cargo/registry/cache" "$cargo_home/registry/cache"
+    [[ -d "$real_cargo/registry/index" ]] && ln -s "$real_cargo/registry/index" "$cargo_home/registry/index"
+  fi
   local target="${CARGO_TARGET_DIR:-${VAIEV_ROOT:+$VAIEV_ROOT/target}}"
   local venv="${TDD_CI_LOCAL_VENV:-${VAIEV_TOOLS:+$VAIEV_TOOLS/venv-validate}}"
   local -a extra=()
@@ -225,6 +236,7 @@ run_isolated() {
     "${extra[@]}" \
     nice -n 10 ionice -c3 "$@"
 }
+cleanup_pin() { if [[ -n "${PIN_DIR:-}" && -d "$PIN_DIR" ]]; then chmod u+w "$PIN_DIR"; rm -rf "$PIN_DIR"; fi; }
 cleanup_build_home() { [[ -n "$BUILD_HOME" && -d "$BUILD_HOME" ]] && rm -rf "$BUILD_HOME"; BUILD_HOME=""; }
 
 # Run agent CLI under timeout; on 429/quota/unavailable, note and exit non-zero.
@@ -312,6 +324,30 @@ snapshot_remote_refs
 prepare_cli_home
 trap on_exit EXIT
 
+# Pin ci-local.sh BEFORE any agent runs: resolve the base SHA now and copy the
+# script into a mktemp dir outside the worktree (dir 0500, file 0400), keeping its
+# sha256 in a variable. Step 3c runs this snapshot only; origin/main is never re-read.
+# Same uid as the agent: this protects against accidents, not a malicious agent
+# (use a separate uid or a root-owned pin for that).
+PIN_DIR=""; CI_PIN=""; PIN_SHA=""; BASE_SHA=""
+if [[ $DRY_RUN -eq 0 ]]; then
+  BASE_SHA=$(git -C "$WT" rev-parse --verify "${BASE_REF}^{commit}")
+  PIN_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/ci-local-pin.XXXXXX")
+  CI_PIN="$PIN_DIR/ci-local.sh"
+  if [[ -n "$CI_LOCAL_PATH" ]]; then
+    cp -- "$CI_LOCAL_PATH" "$CI_PIN" || { echo "ABORT: cannot read --ci-local $CI_LOCAL_PATH" >&2; exit 1; }
+    PIN_SHA=$(sha256sum "$CI_PIN" | cut -d' ' -f1)
+    [[ "$PIN_SHA" == "$CI_LOCAL_SHA" ]] || { echo "ABORT: --ci-local sha256 $PIN_SHA != expected $CI_LOCAL_SHA" >&2; exit 1; }
+  elif ! git -C "$WT" show "$BASE_SHA:scripts/ci-local.sh" > "$CI_PIN" 2>/dev/null; then
+    echo "ABORT: $BASE_REF ($BASE_SHA) has no scripts/ci-local.sh (sidged #74 not merged yet)." >&2
+    echo "       Pass a reviewed copy: --ci-local <path> --ci-local-sha256 <hex>. No handover without ci-local GREEN." >&2
+    exit 1
+  fi
+  PIN_SHA=$(sha256sum "$CI_PIN" | cut -d' ' -f1)
+  chmod 0400 "$CI_PIN"; chmod 0500 "$PIN_DIR"
+  echo "ci-local pinned before agent: base $BASE_SHA sha256 $PIN_SHA"
+fi
+
 PROMPT1="$(mktemp)"; PROMPT2="$(mktemp)"
 cat > "$PROMPT1" <<P1
 [PLAN ONLY — do not modify source files]
@@ -368,24 +404,14 @@ guard_no_push
 echo "=== [3c] Mandatory pre-push gate: pinned scripts/ci-local.sh (must be GREEN) ==="
 # Fail closed: run a pinned copy from outside the worktree; the agent-edited
 # worktree copy must be byte-identical; caller CI_LOCAL_* never reaches it.
-CI_PIN=""
 if [[ $DRY_RUN -eq 0 ]]; then
-  CI_PIN=$(mktemp "${TMPDIR:-/tmp}/ci-local-pinned.XXXXXX")
-  if [[ -n "$CI_LOCAL_PATH" ]]; then
-    cp -- "$CI_LOCAL_PATH" "$CI_PIN" || { echo "ABORT: cannot read --ci-local $CI_LOCAL_PATH" >&2; exit 1; }
-    pin_sha=$(sha256sum "$CI_PIN" | cut -d' ' -f1)
-    [[ "$pin_sha" == "$CI_LOCAL_SHA" ]] || { echo "ABORT: --ci-local sha256 $pin_sha != expected $CI_LOCAL_SHA" >&2; exit 1; }
-  elif ! git -C "$WT" show "$BASE_REF:scripts/ci-local.sh" > "$CI_PIN" 2>/dev/null; then
-    echo "ABORT: $BASE_REF has no scripts/ci-local.sh (sidged #74 not merged yet)." >&2
-    echo "       Pass a reviewed copy: --ci-local <path> --ci-local-sha256 <hex>. No handover without ci-local GREEN." >&2
-    exit 1
-  fi
-  pin_sha=$(sha256sum "$CI_PIN" | cut -d' ' -f1)
+  now_sha=$(sha256sum "$CI_PIN" 2>/dev/null | cut -d' ' -f1 || true)
+  [[ "$now_sha" == "$PIN_SHA" ]] || { echo "ABORT: pinned ci-local changed since snapshot (${now_sha:-missing} != $PIN_SHA)" >&2; exit 1; }
   wt_sha=$(sha256sum "$WT/scripts/ci-local.sh" 2>/dev/null | cut -d' ' -f1 || true)
-  if [[ "$wt_sha" != "$pin_sha" ]]; then
-    echo "ABORT: worktree scripts/ci-local.sh (${wt_sha:-missing}) differs from pinned ($pin_sha)" >&2; exit 1
+  if [[ "$wt_sha" != "$PIN_SHA" ]]; then
+    echo "ABORT: worktree scripts/ci-local.sh (${wt_sha:-missing}) differs from pinned ($PIN_SHA)" >&2; exit 1
   fi
-  echo "ci-local pinned sha256 $pin_sha"
+  echo "ci-local pinned sha256 $PIN_SHA (base $BASE_SHA)"
   ( cd "$WT" && run_isolated bash "$CI_PIN" ) || { echo "ABORT: ci-local.sh RED; fix before handover" >&2; exit 1; }
 else
   echo "(dry-run) would run the pinned ci-local.sh (isolated env, nice+ionice) in $WT"

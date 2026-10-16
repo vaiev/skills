@@ -56,3 +56,16 @@ Run `bash lead-kit/review/tests/test-tdd-loop-no-push.sh` from the repository ro
 **Limits (not a security boundary):** the isolation above is environment-only. The CLI agent runs as the same uid as the operator, so it can still read anything that uid can read (including the real `HOME`, credential files and other processes' memory where permitted). It protects against accidental pushes via inherited credentials, not against a malicious agent running as that uid; use a separate uid/container for that.
 
 The temporary CLI `HOME` (`${TMPDIR:-/tmp}/tdd-loop-cli-home.*`) is created with umask 077 and removed on normal exit and on the `EXIT` trap. A `SIGKILL` (or power loss) skips the trap and leaves the copy of the CLI login files behind; remove stale `tdd-loop-cli-home.*` directories manually in that case.
+
+### ci-local gate (step 3c)
+
+Before the first agent call, tdd-loop resolves `BASE_REF` to a SHA and snapshots
+`scripts/ci-local.sh` from it (or `--ci-local <path>` checked against
+`--ci-local-sha256`) into a `mktemp -d` outside the worktree (dir 0500, file 0400),
+keeping the sha256 in memory. Step 3c verifies that hash, requires the worktree copy
+to be identical, and runs the snapshot; `origin/main` is not re-read. Build, test and
+ci-local run under `env -i` with a temporary HOME and a clean `CARGO_HOME` (only the
+registry download cache and index are linked in; no `credentials.toml` or config).
+**Limit:** the agent runs as the same uid, so the pin and the linked registry are
+protection against accidents, not against a malicious agent (that needs a separate
+uid or a root-owned pin).
