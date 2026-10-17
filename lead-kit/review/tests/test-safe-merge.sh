@@ -81,4 +81,18 @@ t custom-reviewer-hub-only-refused refuse
 setup; echo '[]' >"$MOCK_DIR/reviews.json"
 echo '[{"id":7,"author_bot":"Review Bot","created":"1","title":"project#1 APPROVE @aaaaaaa","body":""}]' >"$MOCK_DIR/hub.json"
 t former-reviewer-refused refuse
+# Latest run per (workflow, event) decides
+run(){ echo "{\"id\":$1,\"workflow_id\":$2,\"name\":\"$3\",\"event\":\"$4\",\"run_number\":$5,\"run_attempt\":$6,\"status\":\"$7\",\"conclusion\":$8}"; }
+ar(){ setup; echo "[$(rv reviewer APPROVED $H 1)]" >"$MOCK_DIR/reviews.json"; echo "{\"workflow_runs\":[$1]}" >"$MOCK_DIR/runs.json"; }
+ar "$(run 1 10 ci pull_request 5 1 completed '"failure"'),$(run 2 10 ci pull_request 5 2 completed '"success"')"; t latest-rerun-green-supersedes-failed ok
+ar "$(run 1 10 ci pull_request 5 1 completed '"failure"'),$(run 3 10 ci pull_request 6 1 completed '"success"')"; t newer-run-green-supersedes-older-failed ok
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"'),$(run 2 10 ci pull_request 5 2 completed '"failure"')"; t old-green-newer-failed refuse
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"'),$(run 2 10 ci pull_request 6 1 completed '"cancelled"')"; t latest-cancelled refuse
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"'),$(run 2 10 ci pull_request 6 1 queued null)"; t latest-pending refuse
+ar "$(run 1 10 ci pull_request 5 1 in_progress null)"; t only-in-progress refuse
+ar ""; t no-runs-latest refuse
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"'),$(run 2 10 ci push 7 1 completed '"failure"')"; t events-tracked-separately-push-failed refuse
+ar "$(run 1 10 ci pull_request 5 1 completed '"failure"'),$(run 2 10 ci push 7 1 completed '"success"')"; t events-separate-push-green-does-not-hide-pr-failure refuse
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"'),$(run 2 11 validate pull_request 3 1 completed '"failure"')"; t workflows-tracked-separately refuse
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"'),$(run 2 10 ci push 7 1 completed '"success"'),$(run 3 11 validate pull_request 3 2 completed '"success"'),$(run 4 11 validate pull_request 3 1 completed '"failure"')"; t all-latest-green ok
 echo "== $pass passed, $fail failed"; [ $fail -eq 0 ]

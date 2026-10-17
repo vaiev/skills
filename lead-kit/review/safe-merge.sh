@@ -107,10 +107,28 @@ if [ $RC -ne 0 ]; then
   echo "WARNING: actions runs unreadable"
   [ $ALLOW_CI -eq 1 ] || { echo "REFUSE: CI unverified (pass --allow-unverified-ci to override)"; exit 5; }
 else
-  RES=$(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);r=d.get("workflow_runs",[]);bad=[x["name"]+":"+str(x.get("conclusion") or x["status"]) for x in r if x["status"]!="completed" or x.get("conclusion")!="success"];print(("NONE" if not r else "")+" ".join(bad))' "$AR")
+  # Only the LATEST run per (workflow, event) counts, so a green re-run supersedes an
+  # older failed run. Still fail closed: no runs, latest not completed, or latest not success.
+  RES=$(python3 - "$AR" <<'PY'
+import json, sys
+runs = json.loads(sys.argv[1]).get("workflow_runs", [])
+if not runs:
+    print("NONE"); sys.exit()
+latest = {}
+for x in runs:
+    key = (x.get("workflow_id") or x.get("name"), x.get("event", ""))
+    rank = (x.get("run_number", 0), x.get("run_attempt", 1), x.get("created_at", ""), x.get("id", 0))
+    if key not in latest or rank > latest[key][0]:
+        latest[key] = (rank, x)
+bad = [f'{x["name"]}[{x.get("event", "")}]:{x.get("conclusion") or x["status"]}'
+       for _, x in latest.values()
+       if x["status"] != "completed" or x.get("conclusion") != "success"]
+print(" ".join(bad))
+PY
+)
   if [ "$RES" = NONE ]; then echo "WARNING: no Actions runs for head SHA"; [ $ALLOW_CI -eq 1 ] || { echo "REFUSE: CI unverified (no runs; pass --allow-unverified-ci)"; exit 5; }
   elif [ -n "$RES" ]; then echo "REFUSE: actions runs not green: $RES"; exit 5
-  else echo "OK actions runs all completed+success"; fi
+  else echo "OK latest actions run per workflow+event completed+success"; fi
 fi
 # Optional: check-runs (informational only)
 set +e; CR=$("$GH" api "repos/$REPO/commits/$HEAD/check-runs" 2>&1); RC=$?; set -e
