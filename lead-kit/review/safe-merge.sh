@@ -107,10 +107,52 @@ if [ $RC -ne 0 ]; then
   echo "WARNING: actions runs unreadable"
   [ $ALLOW_CI -eq 1 ] || { echo "REFUSE: CI unverified (pass --allow-unverified-ci to override)"; exit 5; }
 else
-  RES=$(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);r=d.get("workflow_runs",[]);bad=[x["name"]+":"+str(x.get("conclusion") or x["status"]) for x in r if x["status"]!="completed" or x.get("conclusion")!="success"];print(("NONE" if not r else "")+" ".join(bad))' "$AR")
+  # Only the LATEST run per (workflow, event) counts, so a green re-run supersedes an
+  # older failed run. Still fail closed: no runs, latest not completed, or latest not success.
+  REQ_CONF=${SAFE_MERGE_REQUIRED_CONFIG:-$(dirname "$0")/required-workflows.conf}
+  [ -n "${SAFE_MERGE_REQUIRED_CONFIG+x}" ] && echo "WARNING: SAFE_MERGE_REQUIRED_CONFIG is set ($REQ_CONF); the shipped required-workflows.conf is NOT used"
+  if [ -n "${SAFE_MERGE_REQUIRED_WORKFLOWS+x}" ]; then
+    echo "WARNING: SAFE_MERGE_REQUIRED_WORKFLOWS is set; it replaces the configured list for $REPO"
+    REQ=$SAFE_MERGE_REQUIRED_WORKFLOWS; REQ_SRC="env SAFE_MERGE_REQUIRED_WORKFLOWS"; REQ_FOUND=1
+  else
+    REQ_LINE=$(awk -v r="$REPO" -F: '$0 !~ /^[[:space:]]*#/ && $1 == r { print; exit }' "$REQ_CONF" 2>/dev/null || true)
+    REQ=${REQ_LINE#*:}; REQ_SRC="$REQ_CONF entry $REPO"; REQ_FOUND=$([ -n "$REQ_LINE" ] && echo 1 || echo 0)
+  fi
+  # Normalise: trim each entry, drop empties; an empty result is never "no requirement".
+  REQ=$(printf '%s' "${REQ:-}" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | paste -sd, - | sed 's/,/, /g' || true)
+  if [ "$REQ_FOUND" = 0 ]; then
+    echo "WARNING: no required workflows configured for $REPO in $REQ_CONF"
+    [ $ALLOW_CI -eq 1 ] || { echo "REFUSE: CI unverified (repo not in $REQ_CONF; pass --allow-unverified-ci)"; exit 5; }
+  elif [ -z "$REQ" ]; then
+    echo "REFUSE: required workflow list is empty after trimming (source: $REQ_SRC)"; exit 5
+  else
+    echo "required workflows: $REQ (source: $REQ_SRC)"
+  fi
+  RES=$(python3 - "$AR" "$REQ" "$HEAD" <<'PY'
+import json, sys
+head = sys.argv[3]
+# Client-side guard: only runs for exactly this head SHA count.
+runs = [x for x in json.loads(sys.argv[1]).get("workflow_runs", []) if x.get("head_sha", head) == head]
+required = [w.strip() for w in sys.argv[2].split(",") if w.strip()]
+if not runs:
+    print("NONE"); sys.exit()
+latest = {}
+for x in runs:
+    key = (x.get("workflow_id") or x.get("name"), x.get("event", ""))
+    rank = (x.get("run_number", 0), x.get("run_attempt", 1), x.get("created_at", ""), x.get("id", 0))
+    if key not in latest or rank > latest[key][0]:
+        latest[key] = (rank, x)
+bad = [f'{x["name"]}[{x.get("event", "")}]:{x.get("conclusion") or x["status"]}'
+       for _, x in latest.values()
+       if x["status"] != "completed" or x.get("conclusion") != "success"]
+names = {x["name"] for _, x in latest.values()}
+bad += [f"{w}:missing" for w in required if w not in names]
+print(" ".join(bad))
+PY
+)
   if [ "$RES" = NONE ]; then echo "WARNING: no Actions runs for head SHA"; [ $ALLOW_CI -eq 1 ] || { echo "REFUSE: CI unverified (no runs; pass --allow-unverified-ci)"; exit 5; }
   elif [ -n "$RES" ]; then echo "REFUSE: actions runs not green: $RES"; exit 5
-  else echo "OK actions runs all completed+success"; fi
+  else echo "OK latest actions run per workflow+event completed+success"; fi
 fi
 # Optional: check-runs (informational only)
 set +e; CR=$("$GH" api "repos/$REPO/commits/$HEAD/check-runs" 2>&1); RC=$?; set -e
