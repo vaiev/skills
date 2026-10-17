@@ -5,7 +5,10 @@ H=aaaaaaa1111111111111111111111111111111111; O=bbbbbbb22222222222222222222222222
 export SAFE_MERGE_REVIEWER_LOGINS="reviewer,maintainer rb"
 export SAFE_MERGE_DEFAULT_OWNER=example SAFE_MERGE_ALLOWED_REPOS=example/project
 export SAFE_MERGE_CONFIG=$(mktemp)
-trap 'rm -f "$SAFE_MERGE_CONFIG"; rm -rf "${test_dirs[@]}"' EXIT
+# Required workflows per repo (fixture): example/project needs "ci".
+export SAFE_MERGE_REQUIRED_CONFIG=$(mktemp); echo 'example/project: ci' >"$SAFE_MERGE_REQUIRED_CONFIG"
+unset SAFE_MERGE_REQUIRED_WORKFLOWS
+trap 'rm -f "$SAFE_MERGE_CONFIG" "$SAFE_MERGE_REQUIRED_CONFIG"; rm -rf "${test_dirs[@]}"' EXIT
 test_dirs=()
 pass=0; fail=0
 setup(){ export MOCK_DIR=$(mktemp -d); test_dirs+=("$MOCK_DIR"); echo '[]' >"$MOCK_DIR/comments.json"
@@ -95,4 +98,14 @@ ar "$(run 1 10 ci pull_request 5 1 completed '"success"'),$(run 2 10 ci push 7 1
 ar "$(run 1 10 ci pull_request 5 1 completed '"failure"'),$(run 2 10 ci push 7 1 completed '"success"')"; t events-separate-push-green-does-not-hide-pr-failure refuse
 ar "$(run 1 10 ci pull_request 5 1 completed '"success"'),$(run 2 11 validate pull_request 3 1 completed '"failure"')"; t workflows-tracked-separately refuse
 ar "$(run 1 10 ci pull_request 5 1 completed '"success"'),$(run 2 10 ci push 7 1 completed '"success"'),$(run 3 11 validate pull_request 3 2 completed '"success"'),$(run 4 11 validate pull_request 3 1 completed '"failure"')"; t all-latest-green ok
+# Required workflows per repo
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; SAFE_MERGE_REQUIRED_WORKFLOWS="ci, validate" t required-workflow-missing refuse
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"'),$(run 2 11 validate pull_request 3 1 completed '"success"')"; SAFE_MERGE_REQUIRED_WORKFLOWS="ci, validate" t required-workflows-all-green ok
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; echo 'example/project: ci, other' >"$SAFE_MERGE_REQUIRED_CONFIG"; SAFE_MERGE_REQUIRED_WORKFLOWS="ci" t env-override-wins ok
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; t config-required-missing-other refuse
+echo 'other/repo: ci' >"$SAFE_MERGE_REQUIRED_CONFIG"
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; t unknown-repo-refused refuse
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; t unknown-repo-allow-unverified ok --allow-unverified-ci
+echo 'example/project: ci' >"$SAFE_MERGE_REQUIRED_CONFIG"
+grep -q '^vaiev/sidged: Rust CI, Validate schemas and examples$' "$D/../required-workflows.conf" && { echo "PASS shipped-conf-sidged"; pass=$((pass+1)); } || { echo "FAIL shipped-conf-sidged"; fail=$((fail+1)); }
 echo "== $pass passed, $fail failed"; [ $fail -eq 0 ]

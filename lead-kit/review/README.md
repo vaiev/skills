@@ -28,6 +28,11 @@ including the author of hub notes. GitHub verdict messages retain support for
 the existing `Verdict: APPROVE` format; the display name is not an identity
 authentication mechanism.
 
+Required workflows per repo live in `required-workflows.conf` (override for one call with
+`SAFE_MERGE_REQUIRED_WORKFLOWS="A, B"`, config path via `SAFE_MERGE_REQUIRED_CONFIG`). Only the
+latest run per (workflow, event) on the head counts; a required workflow without a green latest
+run, or a repo not listed, is refused unless `--allow-unverified-ci`.
+
 The guard requires approval bound to the current head, refuses outstanding
 change requests and blocking bot verdicts, and checks CI. It squash-merges with
 `--match-head-commit`. `--allow-unverified-ci` permits missing/unreadable Actions

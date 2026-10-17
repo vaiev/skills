@@ -109,9 +109,17 @@ if [ $RC -ne 0 ]; then
 else
   # Only the LATEST run per (workflow, event) counts, so a green re-run supersedes an
   # older failed run. Still fail closed: no runs, latest not completed, or latest not success.
-  RES=$(python3 - "$AR" <<'PY'
+  REQ_CONF=${SAFE_MERGE_REQUIRED_CONFIG:-$(dirname "$0")/required-workflows.conf}
+  if [ -n "${SAFE_MERGE_REQUIRED_WORKFLOWS+x}" ]; then REQ=$SAFE_MERGE_REQUIRED_WORKFLOWS
+  else REQ=$(awk -v r="$REPO" -F: '$0 !~ /^[[:space:]]*#/ && $1 == r { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }' "$REQ_CONF" 2>/dev/null || true); fi
+  if [ -z "$REQ" ]; then
+    echo "WARNING: no required workflows configured for $REPO"
+    [ $ALLOW_CI -eq 1 ] || { echo "REFUSE: CI unverified (repo not in $REQ_CONF; pass --allow-unverified-ci)"; exit 5; }
+  fi
+  RES=$(python3 - "$AR" "$REQ" <<'PY'
 import json, sys
 runs = json.loads(sys.argv[1]).get("workflow_runs", [])
+required = [w.strip() for w in sys.argv[2].split(",") if w.strip()]
 if not runs:
     print("NONE"); sys.exit()
 latest = {}
@@ -123,6 +131,8 @@ for x in runs:
 bad = [f'{x["name"]}[{x.get("event", "")}]:{x.get("conclusion") or x["status"]}'
        for _, x in latest.values()
        if x["status"] != "completed" or x.get("conclusion") != "success"]
+names = {x["name"] for _, x in latest.values()}
+bad += [f"{w}:missing" for w in required if w not in names]
 print(" ".join(bad))
 PY
 )
