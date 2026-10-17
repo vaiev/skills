@@ -110,15 +110,29 @@ else
   # Only the LATEST run per (workflow, event) counts, so a green re-run supersedes an
   # older failed run. Still fail closed: no runs, latest not completed, or latest not success.
   REQ_CONF=${SAFE_MERGE_REQUIRED_CONFIG:-$(dirname "$0")/required-workflows.conf}
-  if [ -n "${SAFE_MERGE_REQUIRED_WORKFLOWS+x}" ]; then REQ=$SAFE_MERGE_REQUIRED_WORKFLOWS
-  else REQ=$(awk -v r="$REPO" -F: '$0 !~ /^[[:space:]]*#/ && $1 == r { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }' "$REQ_CONF" 2>/dev/null || true); fi
-  if [ -z "$REQ" ]; then
-    echo "WARNING: no required workflows configured for $REPO"
-    [ $ALLOW_CI -eq 1 ] || { echo "REFUSE: CI unverified (repo not in $REQ_CONF; pass --allow-unverified-ci)"; exit 5; }
+  [ -n "${SAFE_MERGE_REQUIRED_CONFIG+x}" ] && echo "WARNING: SAFE_MERGE_REQUIRED_CONFIG is set ($REQ_CONF); the shipped required-workflows.conf is NOT used"
+  if [ -n "${SAFE_MERGE_REQUIRED_WORKFLOWS+x}" ]; then
+    echo "WARNING: SAFE_MERGE_REQUIRED_WORKFLOWS is set; it replaces the configured list for $REPO"
+    REQ=$SAFE_MERGE_REQUIRED_WORKFLOWS; REQ_SRC="env SAFE_MERGE_REQUIRED_WORKFLOWS"; REQ_FOUND=1
+  else
+    REQ_LINE=$(awk -v r="$REPO" -F: '$0 !~ /^[[:space:]]*#/ && $1 == r { print; exit }' "$REQ_CONF" 2>/dev/null || true)
+    REQ=${REQ_LINE#*:}; REQ_SRC="$REQ_CONF entry $REPO"; REQ_FOUND=$([ -n "$REQ_LINE" ] && echo 1 || echo 0)
   fi
-  RES=$(python3 - "$AR" "$REQ" <<'PY'
+  # Normalise: trim each entry, drop empties; an empty result is never "no requirement".
+  REQ=$(printf '%s' "${REQ:-}" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | paste -sd, - | sed 's/,/, /g' || true)
+  if [ "$REQ_FOUND" = 0 ]; then
+    echo "WARNING: no required workflows configured for $REPO in $REQ_CONF"
+    [ $ALLOW_CI -eq 1 ] || { echo "REFUSE: CI unverified (repo not in $REQ_CONF; pass --allow-unverified-ci)"; exit 5; }
+  elif [ -z "$REQ" ]; then
+    echo "REFUSE: required workflow list is empty after trimming (source: $REQ_SRC)"; exit 5
+  else
+    echo "required workflows: $REQ (source: $REQ_SRC)"
+  fi
+  RES=$(python3 - "$AR" "$REQ" "$HEAD" <<'PY'
 import json, sys
-runs = json.loads(sys.argv[1]).get("workflow_runs", [])
+head = sys.argv[3]
+# Client-side guard: only runs for exactly this head SHA count.
+runs = [x for x in json.loads(sys.argv[1]).get("workflow_runs", []) if x.get("head_sha", head) == head]
 required = [w.strip() for w in sys.argv[2].split(",") if w.strip()]
 if not runs:
     print("NONE"); sys.exit()

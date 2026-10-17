@@ -108,4 +108,17 @@ ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; t unknown-repo-refus
 ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; t unknown-repo-allow-unverified ok --allow-unverified-ci
 echo 'example/project: ci' >"$SAFE_MERGE_REQUIRED_CONFIG"
 grep -q '^vaiev/sidged: Rust CI, Validate schemas and examples$' "$D/../required-workflows.conf" && { echo "PASS shipped-conf-sidged"; pass=$((pass+1)); } || { echo "FAIL shipped-conf-sidged"; fail=$((fail+1)); }
+# Client-side head_sha filter: a green run for another SHA does not count
+ar "{\"id\":1,\"workflow_id\":10,\"name\":\"ci\",\"event\":\"pull_request\",\"run_number\":5,\"run_attempt\":1,\"status\":\"completed\",\"conclusion\":\"success\",\"head_sha\":\"$O\"}"; t other-sha-run-ignored refuse
+# Overrides must be loud, and an empty effective list refuses
+to(){ local name="$1" want="$2" pat="$3"; shift 3; out=$("$S" project 1 "$@" 2>&1); rc=$?
+ if { { [ "$want" = ok ] && [ $rc -eq 0 ]; } || { [ "$want" = refuse ] && [ $rc -ne 0 ]; }; } && grep -qE -- "$pat" <<<"$out"; then echo "PASS $name"; pass=$((pass+1)); else echo "FAIL $name (rc=$rc)"; echo "$out" | tail -8; fail=$((fail+1)); fi; }
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; SAFE_MERGE_REQUIRED_WORKFLOWS=" , " to env-blank-list-refused refuse "REFUSE: .*required workflow list is empty"
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; echo 'example/project: , ' >"$SAFE_MERGE_REQUIRED_CONFIG"; to conf-blank-entry-refused refuse "REFUSE: .*required workflow list is empty"
+echo 'example/project: ci, validate' >"$SAFE_MERGE_REQUIRED_CONFIG"
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; SAFE_MERGE_REQUIRED_WORKFLOWS="ci" to stale-env-override-is-loud ok "WARNING: SAFE_MERGE_REQUIRED_WORKFLOWS is set"
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; SAFE_MERGE_REQUIRED_WORKFLOWS="ci" to stale-env-override-effective-list ok "required workflows: ci \(source: env SAFE_MERGE_REQUIRED_WORKFLOWS\)"
+echo 'example/project: ci' >"$SAFE_MERGE_REQUIRED_CONFIG"
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; to weaker-config-is-loud ok "WARNING: SAFE_MERGE_REQUIRED_CONFIG is set"
+ar "$(run 1 10 ci pull_request 5 1 completed '"success"')"; to weaker-config-source-visible ok "required workflows: ci \(source: $SAFE_MERGE_REQUIRED_CONFIG entry example/project\)"
 echo "== $pass passed, $fail failed"; [ $fail -eq 0 ]
